@@ -1,31 +1,25 @@
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
-const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
-const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-app.use(cors({ origin: '*' }));
+app.use(cors());
 app.use(express.json());
 
-// Supabase Yapılandırması
-const SUPABASE_URL = 'https://mvqkljryofiaaxbocsqq.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im12cWtsanJ5b2ZpYWF4Ym9jc3FxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcxMzAzOTUsImV4cCI6MjEwMjcwNjM5NX0.FeeZZSnjhHfd8TX2DXv-4JakjYg3YoEWFIv_aHq5akg'; 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const PORT = process.env.PORT || 10000;
 
 let sock = null;
-let qrCodeData = null;
-let connectionStatus = 'CONNECTING'; // CONNECTING | CONNECTED | DISCONNECTED
-let userJid = null;
+let currentQr = null;
+let connectionStatus = 'OFFLINE'; // 'OFFLINE' | 'CONNECTING' | 'CONNECTED'
 
 async function connectToWhatsApp() {
-  connectionStatus = 'CONNECTING';
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
   sock = makeWASocket({
     auth: state,
-    printQRInTerminal: false,
-    browser: ["Laptop Express Bot", "Chrome", "1.0.0"]
+    printQRInTerminal: true,
+    browser: ['Laptop Express Bot', 'Chrome', '1.0.0']
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -35,175 +29,141 @@ async function connectToWhatsApp() {
 
     if (qr) {
       connectionStatus = 'CONNECTING';
-      qrCodeData = await QRCode.toDataURL(qr);
-      console.log('⚡ Yeni QR Kod Üretildi!');
+      try {
+        currentQr = await QRCode.toDataURL(qr);
+        console.log('⚡ Yeni QR Kod Üretildi!');
+      } catch (err) {
+        console.error('QR Kod dönüştürme hatası:', err);
+      }
     }
 
     if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      connectionStatus = 'DISCONNECTED';
-      qrCodeData = null;
-      console.log('Bağlantı kapandı, yeniden bağlanılıyor...', shouldReconnect);
+      const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
+      console.log('Bağlantı kapandı, yeniden bağlanılıyor mu?:', shouldReconnect);
+      connectionStatus = 'OFFLINE';
+      currentQr = null;
       if (shouldReconnect) {
         connectToWhatsApp();
       }
     } else if (connection === 'open') {
+      console.log('✓ WhatsApp Bağlantısı Başarıyla Kuruldu!');
       connectionStatus = 'CONNECTED';
-      qrCodeData = null;
-      userJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-      console.log('✓ WhatsApp Bağlantısı Başarılı!');
+      currentQr = null;
     }
   });
 
+  // WhatsApp Sohbetinden Gelen Yanıtları Dinleme (Fiyat Verildiğinde Çalışır)
   sock.ev.on('messages.upsert', async (chatUpdate) => {
     try {
-      for (const msg of chatUpdate.messages) {
-        if (!msg || !msg.message) continue;
+      const msg = chatUpdate.messages[0];
+      if (!msg || msg.key.fromMe) return;
 
-        const text =
-          msg.message.conversation ||
-          msg.message.extendedTextMessage?.text ||
-          '';
+      const messageContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
+      const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
 
-        const contextInfo =
-          msg.message.extendedTextMessage?.contextInfo ||
-          msg.message.conversation?.contextInfo;
+      // Eğer mesaj bir bildirime "Reply" yapılarak gönderildiyse
+      if (contextInfo && contextInfo.quotedMessage) {
+        const quotedText = contextInfo.quotedMessage.conversation || contextInfo.quotedMessage.extendedTextMessage?.text;
+        
+        if (quotedText && quotedText.includes('YENİ TEKLİF TALEBİ')) {
+          const offerPrice = messageContent ? messageContent.trim() : null;
+          
+          // Alıntı yapılan mesajdan müşteri telefon numarasını veya detayları ayıklama
+          const phoneMatch = quotedText.match(/📞 \*Telefon:\* (.*)/);
+          const offerIdMatch = quotedText.match(/#(\d+)/);
 
-        const quotedMsg = contextInfo?.quotedMessage;
+          if (phoneMatch && offerPrice) {
+            const rawPhone = phoneMatch[1].trim();
+            const offerId = offerIdMatch ? offerIdMatch[1] : '';
 
-        if (quotedMsg && text) {
-          const cleanPrice = text.trim().replace(/\./g, '').replace(/,/g, '').replace(/\s/g, '');
+            let cleanPhone = rawPhone.replace(/\D/g, '');
+            if (cleanPhone.startsWith('0')) cleanPhone = cleanPhone.substring(1);
+            if (!cleanPhone.startsWith('90')) cleanPhone = '90' + cleanPhone;
 
-          if (!isNaN(cleanPrice) && cleanPrice.length > 0) {
-            let quotedText = 
-              quotedMsg.conversation ||
-              quotedMsg.extendedTextMessage?.text ||
-              quotedMsg.imageMessage?.caption ||
-              '';
+            const targetJid = `${cleanPhone}@s.whatsapp.net`;
 
-            const fullQuotedString = quotedText || JSON.stringify(quotedMsg);
-            const match = fullQuotedString.match(/#(\d+)/);
+            // Müşteriye Gönderilecek Fiyat Teklifi Mesajı
+            const customerMessage = `Merhaba,\n\nLaptop Express üzerinden ilettiğiniz cihaz teklif talebiniz incelenmiştir.\n\n💰 *Firmamızın Değerleme Teklifi:* *${offerPrice} TL*\n\nTeklifi onaylıyorsanız mağazamızda veya adresinizde nakit ödeme işleminizi anında tamamlayabiliriz.`;
 
-            if (match) {
-              const offerId = match[1];
-              const offerPrice = cleanPrice;
+            // Müşteriye Mesaj At
+            await sock.sendMessage(targetJid, { text: customerMessage });
+            console.log(`✓ Müşteriye (${targetJid}) teklif mesajı iletildi!`);
 
-              console.log(`🎯 #${offerId} teklif için yanıt yakalandı. Girilen Fiyat: ${offerPrice} TL`);
-
-              // 1. Supabase Güncelle
-              let offer = null;
-              try {
-                const { data, error } = await supabase
-                  .from('teklifler')
-                  .update({ fiyat: offerPrice, status: 'tamamlandi' })
-                  .eq('id', offerId)
-                  .select()
-                  .single();
-
-                if (error) {
-                  console.log('✕ Supabase Güncelleme Hatası:', error.message);
-                  return;
-                }
-                offer = data;
-              } catch (dbErr) {
-                console.log('✕ Supabase İstek Hatası:', dbErr.message);
-                return;
-              }
-
-              if (offer) {
-                console.log('✓ Supabase veritabanı başarıyla güncellendi!');
-                
-                let cleanPhone = offer.telefon.replace(/\D/g, '');
-                if (cleanPhone.startsWith('0')) {
-                  cleanPhone = cleanPhone.substring(1);
-                }
-                if (!cleanPhone.startsWith('90')) {
-                  cleanPhone = '90' + cleanPhone;
-                }
-
-                const targetJid = `${cleanPhone}@s.whatsapp.net`;
-                console.log(`📡 Mesaj Gönderilecek Hedef JID: ${targetJid}`);
-
-                const customerMessage = `Merhaba Sayın *${offer.musteri_adi}*,\n\nLaptop Express üzerinden ilettiğiniz cihaz teklif talebiniz uzman ekibimizce değerlendirilmiştir.\n\n💻 *Cihaz Bilgileri:* ${offer.islemci} / ${offer.ekran_karti}\n💰 *Firmamızın Değerleme Teklifi:* *${offerPrice} TL*\n\nTeklifi onaylıyorsanız mağazamıza gelebilir veya yerinde ödeme talebinde bulunabilirsiniz.`;
-
-                // 2. Müşterinin WhatsApp'ına Mesajı Gönder
-                try {
-                  await sock.sendMessage(targetJid, { text: customerMessage });
-                  console.log(`✓ Müşteriye (${targetJid}) teklif mesajı başarıyla iletildi!`);
-                } catch (sendErr) {
-                  console.log(`✕ Müşteriye (${targetJid}) mesaj atılırken HATA oluştu:`, sendErr.message || sendErr);
-                }
-
-                // 3. Admin Sohbetine Onay Mesajı Düş
-                try {
-                  const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-                  await sock.sendMessage(myJid, {
-                    text: `✅ *#${offerId}* numaralı teklif (*${offerPrice} TL*) müşteriye (*${offer.musteri_adi}* - ${offer.telefon}) başarıyla iletildi.`,
-                  });
-                  console.log(`✓ Admin onay mesajı kendi sohbetine gönderildi.`);
-                } catch (adminErr) {
-                  console.log(`✕ Admin onay mesajı gönderilemedi:`, adminErr.message || adminErr);
-                }
-              }
-            } else {
-              console.log('⚠️ Alıntılanan mesajda #ID bulunamadı.');
-            }
+            // Kendine Onay Mesajı Düş
+            const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+            await sock.sendMessage(myJid, {
+              text: `✓ *#${offerId}* numaralı teklif (*${offerPrice} TL*) müşteriye başarıyla iletildi!`
+            });
           }
         }
       }
     } catch (err) {
-      console.log('✕ Message Upsert Hatası:', err);
+      console.error('Mesaj dinleme hatası:', err);
     }
   });
 }
 
-// GÖRSEL QR KOD SAYFASI
-app.get('/qr', (req, res) => {
-  if (connectionStatus === 'CONNECTED') {
-    return res.send('<h1 style="font-family:sans-serif; text-align:center; margin-top:50px; color:green;">✅ WhatsApp Botu Zaten Bağlı ve Aktif!</h1>');
-  }
-  if (!qrCodeData) {
-    return res.send('<h1 style="font-family:sans-serif; text-align:center; margin-top:50px; color:orange;">⏳ QR Kod Oluşturuluyor, lütfen 5 saniye sonra sayfayı yenileyin...</h1>');
-  }
-  res.send(`
-    <html>
-      <head><title>Laptop Express Bot QR</title></head>
-      <body style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; font-family:sans-serif; background:#0f172a; color:white;">
-        <h2>📱 WhatsApp Botunu Bağlamak İçin QR Kodu Taratın</h2>
-        <img src="${qrCodeData}" style="width:300px; height:300px; border:10px solid white; border-radius:12px; margin:20px 0;" />
-        <p style="color:#94a3b8;">Telefonunuzdan WhatsApp -> Bağlı Cihazlar -> Cihaz Bağla yapın.</p>
-      </body>
-    </html>
-  `);
-});
+// ---------------- REST API ENDPOINTS ----------------
 
+// 1. Bot Durumu ve QR Kod Endpoint'i
 app.get('/status', (req, res) => {
-  res.json({ status: connectionStatus, qr: qrCodeData, user: userJid });
+  res.json({
+    status: connectionStatus,
+    qr: currentQr,
+    user: sock?.user?.id ? sock.user.id.split(':')[0] : null
+  });
 });
 
-app.post('/new-offer', async (req, res) => {
-  const offer = req.body;
-  console.log('📩 Yeni teklif formu tetiklendi:', offer.musteri_adi, offer.telefon);
+// 2. Web Sitesinden Teklif Geldiğinde Tetiklenen Endpoint
+app.post('/send-offer', async (req, res) => {
+  try {
+    const offer = req.body;
 
-  if (connectionStatus === 'CONNECTED' && sock) {
-    const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-    
-    const notifyText = `📩 *Yeni Teklif Talebi (#${offer.id})*\n\n👤 *Müşteri:* ${offer.musteri_adi} (${offer.telefon})\n💻 *İşlemci:* ${offer.islemci}\n🎮 *GPU:* ${offer.ekran_karti}\n🧠 *RAM/SSD:* ${offer.ram} / ${offer.ssd}\n✨ *Kozmetik:* ${offer.kozmetik || 'Belirtilmedi'}\n\n💡 *Bu mesaja yanıt (reply) vererek sadece fiyat yazın (Örn: 18500).*`;
-    
-    try {
-      await sock.sendMessage(myJid, { text: notifyText });
-      console.log('✓ Bildirim kendi sohbetine gönderildi!');
-    } catch (err) {
-      console.log('✕ Mesaj gönderim hatası:', err);
+    if (!offer || !offer.telefon) {
+      return res.status(400).json({ error: 'Eksik teklif verisi' });
     }
-  } else {
-    console.log('⚠️ Bot bağlı değil veya hazır değil!');
+
+    const offerId = offer.id || 'Yeni';
+
+    // Kendi WhatsApp Sohbetine Düşecek Bildirim Mesajı
+    const adminNotification = `📩 *YENİ TEKLİF TALEBİ (#${offerId})*\n\n` +
+      `👤 *Müşteri:* ${offer.musteri_adi || 'Belirtilmedi'}\n` +
+      `📞 *Telefon:* ${offer.telefon}\n` +
+      `💻 *İşlemci:* ${offer.islemci || '-'}\n` +
+      `🎮 *Ekran Kartı:* ${offer.ekran_karti || '-'}\n` +
+      `⚡ *RAM / SSD:* ${offer.ram || '-'} / ${offer.ssd || '-'}\n` +
+      `✨ *Kozmetik / Durum:* ${offer.kozmetik || '-'} / ${offer.kullanim_durumu || '-'}\n\n` +
+      `💡 *Fiyat Vermek İçin:* Bu mesaja "Yanıtla (Reply)" yaparak vermek istediğiniz rakamı yazın (Örn: 18500).`;
+
+    if (sock && connectionStatus === 'CONNECTED') {
+      const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+      await sock.sendMessage(myJid, { text: adminNotification });
+      console.log(`✓ Yeni teklif bildirimi WhatsApp sohbetine (${myJid}) gönderildi!`);
+      return res.json({ success: true, message: 'Bildirim WhatsApp sohbetine iletildi.' });
+    } else {
+      console.log('⚠️ Bot WhatsApp oturumu henüz aktif olmadığı için bildirim gönderilemedi.');
+      return res.status(503).json({ error: 'WhatsApp botu henüz bağlı değil' });
+    }
+  } catch (error) {
+    console.error('❌ /send-offer Hata:', error);
+    return res.status(500).json({ error: error.message });
   }
-  res.json({ received: true });
 });
 
-const PORT = process.env.PORT || 3001;
+// 3. Oturumu Kapatma Endpoint'i
+app.post('/logout', async (req, res) => {
+  try {
+    if (sock) {
+      await sock.logout();
+      connectionStatus = 'OFFLINE';
+      currentQr = null;
+    }
+    res.json({ success: true, message: 'Oturum kapatıldı' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Bot servisi ${PORT} portunda çalışıyor.`);
   connectToWhatsApp();
