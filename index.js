@@ -117,73 +117,41 @@ app.get('/status', (req, res) => {
   });
 });
 
-app.post('/send-offer', async (req, res) => {
-  try {
-    const offer = req.body;
-
-    if (!offer || !offer.telefon) {
-      return res.status(400).json({ error: 'Eksik teklif verisi' });
-    }
-
-    const offerId = offer.id || 'Yeni';
-
-    const adminNotification = `📩 *YENİ TEKLİF TALEBİ (#${offerId})*\n\n` +
-      `👤 *Müşteri:* ${offer.musteri_adi || 'Belirtilmedi'}\n` +
-      `📞 *Telefon:* ${offer.telefon}\n` +
-      `💻 *İşlemci:* ${offer.islemci || '-'}\n` +
-      `🎮 *Ekran Kartı:* ${offer.ekran_karti || '-'}\n` +
-      `⚡ *RAM / SSD:* ${offer.ram || '-'} / ${offer.ssd || '-'}\n` +
-      `✨ *Kozmetik / Durum:* ${offer.kozmetik || '-'} / ${offer.kullanim_durumu || '-'}\n\n` +
-      `💡 *Fiyat Vermek İçin:* Bu mesaja "Yanıtla (Reply)" yaparak vermek istediğiniz rakamı yazın (Örn: 18500).`;
-
-    if (sock && connectionStatus === 'CONNECTED') {
-      const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-      await sock.sendMessage(myJid, { text: adminNotification });
-      console.log(`✓ Yeni teklif bildirimi WhatsApp sohbetine (${myJid}) gönderildi!`);
-      return res.json({ success: true, message: 'Bildirim gönderildi.' });
-    } else {
-      return res.status(503).json({ error: 'WhatsApp botu henüz bağlı değil' });
-    }
-  } catch (error) {
-    console.error('❌ /send-offer Hata:', error);
-    return res.status(500).json({ error: error.message });
-  }
-});
-
-const fs = require('fs');
-const path = require('path');
-
-// ... (Koda üst kısımlar aynı kalacak) ...
-
 app.post('/logout', async (req, res) => {
   try {
     connectionStatus = 'OFFLINE';
     currentQr = null;
 
+    // 1. WhatsApp Oturumunu Güvenli Şekilde Kapat (Patlarsa bile süreci durdurma)
     if (sock) {
       try {
+        sock.ev.removeAllListeners(); // Olay dinleyicilerini temizle
         await sock.logout();
       } catch (e) {
-        console.log('Sock logout hatası (önemsiz):', e.message);
+        console.log('Sock logout uyarısı (yoksayıldı):', e.message);
       }
       sock = null;
     }
 
-    // 1. Oturum Klasörünü (auth_info_baileys) Fiziksel Olarak Sil
+    // 2. Auth Klasörünü (auth_info_baileys) Fiziksel Olarak Temizle
     const authPath = path.join(__dirname, 'auth_info_baileys');
     if (fs.existsSync(authPath)) {
-      fs.rmSync(authPath, { recursive: true, force: true });
-      console.log('🗑️ Eski oturum verileri (auth_info_baileys) temizlendi.');
+      try {
+        fs.rmSync(authPath, { recursive: true, force: true });
+        console.log('🗑️ Eski oturum klasörü başarıyla silindi.');
+      } catch (fsErr) {
+        console.error('Klasör silme hatası:', fsErr.message);
+      }
     }
 
-    // 2. Yeni QR Üretmesi İçin Bağlantıyı Otomatik Yeniden Başlat
+    // 3. 1 Saniye Sonra Yeniden Bağlan ve Taze QR Kod Üret
     setTimeout(() => {
       connectToWhatsApp();
     }, 1000);
 
     return res.json({ success: true, message: 'Oturum kapatıldı, yeni QR üretiliyor.' });
   } catch (err) {
-    console.error('Logout Hatası:', err);
+    console.error('Logout Genel Hatası:', err);
     return res.status(500).json({ error: err.message });
   }
 });
