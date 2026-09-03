@@ -10,7 +10,7 @@ app.use(express.json());
 
 // Supabase Yapılandırması
 const SUPABASE_URL = 'https://mvqkljryofiaaxbocsqq.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im12cWtsanJ5b2ZpYWF4Ym9jc3FxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDAxMjE2MzQsImV4cCI6MjA1NTY5NzYzNH0.MzM1YTVmOTc1MDZkYmViM2UxNzY4ZjRhOWI5MjEwMDQ'; 
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im12cWtsanJ5b2ZpYWF4Ym9jc3FxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcxMzAzOTUsImV4cCI6MjEwMjcwNjM5NX0.FeeZZSnjhHfd8TX2DXv-4JakjYg3YoEWFIv_aHq5akg'; 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 let sock = null;
