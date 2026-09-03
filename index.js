@@ -39,7 +39,7 @@ async function connectToWhatsApp() {
 
     if (connection === 'close') {
       const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
-      console.log('Bağlantı kapandı, yeniden bağlanılıyor mu?:', shouldReconnect);
+      console.log('Bağlantı kapandı, yeniden bağlanılıyor:', shouldReconnect);
       connectionStatus = 'OFFLINE';
       currentQr = null;
       if (shouldReconnect) {
@@ -52,24 +52,35 @@ async function connectToWhatsApp() {
     }
   });
 
-  // Fiyat yanıtlarını dinleyen mekanizma (Reply mesajlarını yakalar)
+  // Fiyat yanıtlarını dinleyen VE DETAYLI LOGLAYAN mekanizma
   sock.ev.on('messages.upsert', async (chatUpdate) => {
     try {
       const msg = chatUpdate.messages[0];
-      if (!msg) return;
+      if (!msg || !msg.message) return;
 
       const messageContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
       const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
 
+      // 1. Yanıtlanan mesaj var mı kontrol et
       if (contextInfo && contextInfo.quotedMessage) {
+        console.log('🔍 [DEBUG] Bir mesaja yanıt verildi!');
+        
         const quotedText =
           contextInfo.quotedMessage.conversation ||
           contextInfo.quotedMessage.extendedTextMessage?.text ||
           '';
 
-        if (quotedText.includes('TEKLİF TALEBİ') || quotedText.includes('Telefon:')) {
+        console.log('📝 [DEBUG] Alıntı Yapılan Orijinal Metin:\n', quotedText);
+        console.log('💬 [DEBUG] Yazılan Fiyat Yanıtı:', messageContent);
+
+        // 2. Orijinal bildirim mesajı mı?
+        if (quotedText.includes('TEKLİF TALEBİ') || quotedText.includes('Müşteri') || quotedText.includes('Telefon')) {
           const offerPrice = messageContent ? messageContent.trim() : null;
+
+          // Esnek Numara Yakalama Regex'i
           const phoneMatch = quotedText.match(/(?:Telefon|📞):\s*([0-9+\s()-]+)/i);
+
+          console.log('🔎 [DEBUG] Regex Numarayı Buldu mu?:', phoneMatch ? phoneMatch[1] : 'HAYIR (BULAMADI!)');
 
           if (phoneMatch && offerPrice) {
             const rawPhone = phoneMatch[1].trim();
@@ -78,26 +89,38 @@ async function connectToWhatsApp() {
             if (!cleanPhone.startsWith('90')) cleanPhone = '90' + cleanPhone;
 
             const targetJid = `${cleanPhone}@s.whatsapp.net`;
+            console.log(`🎯 [DEBUG] Müşterinin Hedef WhatsApp Adresi (JID):`, targetJid);
 
             const customerMessage = `Merhaba,\n\nLaptop Express üzerinden ilettiğiniz cihaz teklif talebiniz incelenmiştir.\n\n💰 *Firmamızın Değerleme Teklifi:* *${offerPrice} TL*\n\nTeklifi onaylıyorsanız mağazamızda veya adresinizde nakit ödeme işleminizi anında tamamlayabiliriz.`;
 
-            await sock.sendMessage(targetJid, { text: customerMessage });
-            console.log(`✓ Müşteriye (${targetJid}) teklif iletildi!`);
+            // Müşteriye Göndermeyi Dene
+            try {
+              console.log('🚀 [DEBUG] Müşteriye mesaj gönderme deneniyor...');
+              await sock.sendMessage(targetJid, { text: customerMessage });
+              console.log(`✅ [BAŞARILI] Müşteriye (${targetJid}) mesaj başarıyla iletildi!`);
 
-            const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-            await sock.sendMessage(myJid, {
-              text: `✓ *${offerPrice} TL* teklifiniz müşteriye (${rawPhone}) iletildi!`
-            });
+              // Kendi sohbetine onay mesajı at
+              const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+              await sock.sendMessage(myJid, {
+                text: `✓ *${offerPrice} TL* teklifiniz müşteriye (${rawPhone}) başarıyla iletildi!`
+              });
+            } catch (sendErr) {
+              console.error('❌ [HATA] Müşteriye mesaj gönderilirken Baileys/WhatsApp patladı:', sendErr);
+            }
+          } else {
+            console.log('⚠️ [UYARI] Telefon numarası veya yazılan fiyat okunamadığı için işlem durduruldu.');
           }
+        } else {
+          console.log('⚠️ [UYARI] Alıntı yapılan mesaj bir teklif bildirimi değil.');
         }
       }
     } catch (err) {
-      console.error('Mesaj yanıtı hatası:', err);
+      console.error('❌ [HATA] messages.upsert Genel Hata:', err);
     }
   });
 }
 
-// REST API Rotaları
+// REST API
 app.get('/status', (req, res) => {
   res.json({
     status: connectionStatus,
