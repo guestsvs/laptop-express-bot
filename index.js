@@ -56,52 +56,59 @@ async function connectToWhatsApp() {
   sock.ev.on('messages.upsert', async (chatUpdate) => {
     try {
       const msg = chatUpdate.messages[0];
-      if (!msg || msg.key.fromMe) return;
+      if (!msg) return;
 
       const messageContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
       const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
 
       // Eğer mesaj bir bildirime "Reply" yapılarak gönderildiyse
       if (contextInfo && contextInfo.quotedMessage) {
-        const quotedText = contextInfo.quotedMessage.conversation || contextInfo.quotedMessage.extendedTextMessage?.text;
-        
-        if (quotedText && quotedText.includes('YENİ TEKLİF TALEBİ')) {
+        const quotedText =
+          contextInfo.quotedMessage.conversation ||
+          contextInfo.quotedMessage.extendedTextMessage?.text ||
+          '';
+
+        console.log('📌 Alıntı Yapılan Mesaj:', quotedText);
+        console.log('💬 Yazılan Fiyat Yanıtı:', messageContent);
+
+        // Bildirim mesajının içinde "YENİ TEKLİF TALEBİ" veya "Müşteri" / "Telefon" geçiyor mu?
+        if (quotedText.includes('TEKLİF TALEBİ') || quotedText.includes('Telefon:')) {
           const offerPrice = messageContent ? messageContent.trim() : null;
-          
-          // Alıntı yapılan mesajdan müşteri telefon numarasını veya detayları ayıklama
-          const phoneMatch = quotedText.match(/📞 \*Telefon:\* (.*)/);
-          const offerIdMatch = quotedText.match(/#(\d+)/);
+
+          // Mesajın içinden telefon numarasını bul
+          const phoneMatch = quotedText.match(/(?:Telefon|📞):\s*([0-9+\s()-]+)/i);
 
           if (phoneMatch && offerPrice) {
             const rawPhone = phoneMatch[1].trim();
-            const offerId = offerIdMatch ? offerIdMatch[1] : '';
 
             let cleanPhone = rawPhone.replace(/\D/g, '');
             if (cleanPhone.startsWith('0')) cleanPhone = cleanPhone.substring(1);
             if (!cleanPhone.startsWith('90')) cleanPhone = '90' + cleanPhone;
 
             const targetJid = `${cleanPhone}@s.whatsapp.net`;
+            console.log(`🎯 Müşteri Hedef JID: ${targetJid}`);
 
             // Müşteriye Gönderilecek Fiyat Teklifi Mesajı
             const customerMessage = `Merhaba,\n\nLaptop Express üzerinden ilettiğiniz cihaz teklif talebiniz incelenmiştir.\n\n💰 *Firmamızın Değerleme Teklifi:* *${offerPrice} TL*\n\nTeklifi onaylıyorsanız mağazamızda veya adresinizde nakit ödeme işleminizi anında tamamlayabiliriz.`;
 
-            // Müşteriye Mesaj At
+            // Müşterinin WhatsApp'ına Mesaj Gönder
             await sock.sendMessage(targetJid, { text: customerMessage });
-            console.log(`✓ Müşteriye (${targetJid}) teklif mesajı iletildi!`);
+            console.log(`✓ Müşteriye (${targetJid}) teklif mesajı başarıyla iletildi!`);
 
-            // Kendine Onay Mesajı Düş
+            // Kendi Sohbetine Onay Mesajı Düş
             const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
             await sock.sendMessage(myJid, {
-              text: `✓ *#${offerId}* numaralı teklif (*${offerPrice} TL*) müşteriye başarıyla iletildi!`
+              text: `✓ *${offerPrice} TL* teklifiniz müşteriye (${rawPhone}) başarıyla iletildi!`
             });
+          } else {
+            console.log('⚠️ Telefon numarası veya fiyat okunamadı.');
           }
         }
       }
     } catch (err) {
-      console.error('Mesaj dinleme hatası:', err);
+      console.error('❌ Mesaj yanıtı işleme hatası:', err);
     }
   });
-}
 
 // ---------------- REST API ENDPOINTS ----------------
 
