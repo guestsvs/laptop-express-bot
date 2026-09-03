@@ -8,9 +8,9 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Supabase Yapılandırması (Eksiksiz ve Geçerli Key)
+// Supabase Yapılandırması
 const SUPABASE_URL = 'https://mvqkljryofiaaxbocsqq.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im12cWtsanJ5b2ZpYWF4Ym9jc3FxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcxMzAzOTUsImV4cCI6MjEwMjcwNjM5NX0.FeeZZSnjhHfd8TX2DXv-4JakjYg3YoEWFIv_aHq5akg'; 
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im12cWtsanJ5b2ZpYWF4Ym9jc3FxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDAxMjE2MzQsImV4cCI6MjA1NTY5NzYzNH0.MzM1YTVmOTc1MDZkYmViM2UxNzY4ZjRhOWI5MjEwMDQ'; 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 let sock = null;
@@ -91,7 +91,7 @@ async function connectToWhatsApp() {
 
               console.log(`🎯 #${offerId} teklif için yanıt yakalandı. Girilen Fiyat: ${offerPrice} TL`);
 
-              // 1. Supabase Güncelle (Detaylı Hata İnceleme)
+              // 1. Supabase Güncelle
               let offer = null;
               try {
                 const { data, error } = await supabase
@@ -102,7 +102,7 @@ async function connectToWhatsApp() {
                   .single();
 
                 if (error) {
-                  console.log('✕ Supabase Güncelleme Hatası (Detay):', JSON.stringify(error, null, 2));
+                  console.log('✕ Supabase Güncelleme Hatası:', error.message);
                   return;
                 }
                 offer = data;
@@ -114,7 +114,6 @@ async function connectToWhatsApp() {
               if (offer) {
                 console.log('✓ Supabase veritabanı başarıyla güncellendi!');
                 
-                // Telefon numarasını Türkiye standartlarına (905XXXXXXXXX) getir
                 let cleanPhone = offer.telefon.replace(/\D/g, '');
                 if (cleanPhone.startsWith('0')) {
                   cleanPhone = cleanPhone.substring(1);
@@ -136,7 +135,7 @@ async function connectToWhatsApp() {
                   console.log(`✕ Müşteriye (${targetJid}) mesaj atılırken HATA oluştu:`, sendErr.message || sendErr);
                 }
 
-                // 3. Admin Sohbetine (Kendine) Onay Mesajı Düş
+                // 3. Admin Sohbetine Onay Mesajı Düş
                 try {
                   const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
                   await sock.sendMessage(myJid, {
@@ -159,17 +158,28 @@ async function connectToWhatsApp() {
   });
 }
 
-app.get('/status', (req, res) => {
-  res.json({ status: connectionStatus, qr: qrCodeData, user: userJid });
+// GÖRSEL QR KOD SAYFASI
+app.get('/qr', (req, res) => {
+  if (connectionStatus === 'CONNECTED') {
+    return res.send('<h1 style="font-family:sans-serif; text-align:center; margin-top:50px; color:green;">✅ WhatsApp Botu Zaten Bağlı ve Aktif!</h1>');
+  }
+  if (!qrCodeData) {
+    return res.send('<h1 style="font-family:sans-serif; text-align:center; margin-top:50px; color:orange;">⏳ QR Kod Oluşturuluyor, lütfen 5 saniye sonra sayfayı yenileyin...</h1>');
+  }
+  res.send(`
+    <html>
+      <head><title>Laptop Express Bot QR</title></head>
+      <body style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; font-family:sans-serif; background:#0f172a; color:white;">
+        <h2>📱 WhatsApp Botunu Bağlamak İçin QR Kodu Taratın</h2>
+        <img src="${qrCodeData}" style="width:300px; height:300px; border:10px solid white; border-radius:12px; margin:20px 0;" />
+        <p style="color:#94a3b8;">Telefonunuzdan WhatsApp -> Bağlı Cihazlar -> Cihaz Bağla yapın.</p>
+      </body>
+    </html>
+  `);
 });
 
-app.post('/logout', async (req, res) => {
-  if (sock) {
-    await sock.logout();
-    connectionStatus = 'DISCONNECTED';
-    qrCodeData = null;
-  }
-  res.json({ success: true });
+app.get('/status', (req, res) => {
+  res.json({ status: connectionStatus, qr: qrCodeData, user: userJid });
 });
 
 app.post('/new-offer', async (req, res) => {
