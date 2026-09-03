@@ -150,20 +150,40 @@ app.post('/send-offer', async (req, res) => {
   }
 });
 
+const fs = require('fs');
+const path = require('path');
+
+// ... (Koda üst kısımlar aynı kalacak) ...
+
 app.post('/logout', async (req, res) => {
   try {
-    if (sock) {
-      await sock.logout();
-      connectionStatus = 'OFFLINE';
-      currentQr = null;
-    }
-    res.json({ success: true, message: 'Oturum kapatıldı' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+    connectionStatus = 'OFFLINE';
+    currentQr = null;
 
-app.listen(PORT, () => {
-  console.log(`Bot servisi ${PORT} portunda çalışıyor.`);
-  connectToWhatsApp();
+    if (sock) {
+      try {
+        await sock.logout();
+      } catch (e) {
+        console.log('Sock logout hatası (önemsiz):', e.message);
+      }
+      sock = null;
+    }
+
+    // 1. Oturum Klasörünü (auth_info_baileys) Fiziksel Olarak Sil
+    const authPath = path.join(__dirname, 'auth_info_baileys');
+    if (fs.existsSync(authPath)) {
+      fs.rmSync(authPath, { recursive: true, force: true });
+      console.log('🗑️ Eski oturum verileri (auth_info_baileys) temizlendi.');
+    }
+
+    // 2. Yeni QR Üretmesi İçin Bağlantıyı Otomatik Yeniden Başlat
+    setTimeout(() => {
+      connectToWhatsApp();
+    }, 1000);
+
+    return res.json({ success: true, message: 'Oturum kapatıldı, yeni QR üretiliyor.' });
+  } catch (err) {
+    console.error('Logout Hatası:', err);
+    return res.status(500).json({ error: err.message });
+  }
 });
