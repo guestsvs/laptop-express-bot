@@ -11,8 +11,8 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 
 // Supabase Bağlantısı
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://YOUR_SUPABASE_URL.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || 'YOUR_SUPABASE_ANON_KEY';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://mvqkljryofiaaxbocsqq.supabase.co/rest/v1/';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im12cWtsanJ5b2ZpYWF4Ym9jc3FxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcxMzAzOTUsImV4cCI6MjEwMjcwNjM5NX0.FeeZZSnjhHfd8TX2DXv-4JakjYg3YoEWFIv_aHq5akg';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 let sock = null;
