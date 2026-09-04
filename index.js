@@ -1,4 +1,4 @@
-const { default: makeWASocket, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, initAuthCreds, BufferJSON } = require('@whiskeysockets/baileys');
 const { createClient } = require('@supabase/supabase-js');
 const express = require('express');
 const cors = require('cors');
@@ -11,16 +11,26 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 
 // Supabase Bağlantısı
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://mvqkljryofiaaxbocsqq.supabase.co/rest/v1/';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im12cWtsanJ5b2ZpYWF4Ym9jc3FxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcxMzAzOTUsImV4cCI6MjEwMjcwNjM5NX0.FeeZZSnjhHfd8TX2DXv-4JakjYg3YoEWFIv_aHq5akg';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://YOUR_SUPABASE_URL.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || 'YOUR_SUPABASE_ANON_KEY';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 let sock = null;
 let currentQr = null;
 let connectionStatus = 'OFFLINE';
 
-// SUPABASE TABANLI AUTH ADAPTER (Render Sıfırlansa Bile Oturum Silinmez)
+// DÜZELTİLMİŞ VE SAF SUPABASE AUTH ADAPTER (Sonsuz Döngüyü Kırar)
 async function useSupabaseAuthState() {
+  const writeData = async (data, id) => {
+    try {
+      await supabase
+        .from('whatsapp_session')
+        .upsert({ id, data: JSON.stringify(data, BufferJSON.replacer) });
+    } catch (err) {
+      console.error('Supabase write error:', err);
+    }
+  };
+
   const readData = async (id) => {
     try {
       const { data, error } = await supabase
@@ -28,20 +38,11 @@ async function useSupabaseAuthState() {
         .select('data')
         .eq('id', id)
         .single();
+
       if (error || !data) return null;
-      return JSON.parse(data.data);
+      return JSON.parse(data.data, BufferJSON.reviver);
     } catch {
       return null;
-    }
-  };
-
-  const writeData = async (id, val) => {
-    try {
-      await supabase
-        .from('whatsapp_session')
-        .upsert({ id, data: JSON.stringify(val) });
-    } catch (err) {
-      console.error('Supabase auth kaydetme hatası:', err);
     }
   };
 
@@ -49,11 +50,11 @@ async function useSupabaseAuthState() {
     try {
       await supabase.from('whatsapp_session').delete().eq('id', id);
     } catch (err) {
-      console.error('Supabase auth silme hatası:', err);
+      console.error('Supabase delete error:', err);
     }
   };
 
-  const creds = (await readData('creds')) || require('@whiskeysockets/baileys').initAuthCreds();
+  const creds = (await readData('creds')) || initAuthCreds();
 
   return {
     state: {
@@ -78,14 +79,14 @@ async function useSupabaseAuthState() {
             for (const id in data[category]) {
               const value = data[category][id];
               const key = `${category}-${id}`;
-              tasks.push(value ? writeData(key, value) : removeData(key));
+              tasks.push(value ? writeData(value, key) : removeData(key));
             }
           }
           await Promise.all(tasks);
         }
       }
     },
-    saveCreds: () => writeData('creds', creds)
+    saveCreds: () => writeData(creds, 'creds')
   };
 }
 
@@ -127,7 +128,7 @@ async function connectToWhatsApp() {
         connectionStatus = 'OFFLINE';
 
         if (!isLoggedOut) {
-          console.log('🔄 Oturum Supabase üzerinde geçerli. 3 saniye içinde tekrar bağlanılıyor...');
+          console.log('🔄 Oturum geçerli. 3 saniye içinde tekrar bağlanılıyor...');
           setTimeout(() => connectToWhatsApp(), 3000);
         } else {
           console.log('❌ Oturum kapatıldı. Supabase oturum verileri temizleniyor...');
