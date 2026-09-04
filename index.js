@@ -1,9 +1,8 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason } = require('@whiskeysockets/baileys');
+const { createClient } = require('@supabase/supabase-js');
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -11,22 +10,94 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
+// Supabase Bağlantısı
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://YOUR_SUPABASE_URL.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || 'YOUR_SUPABASE_ANON_KEY';
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
 let sock = null;
 let currentQr = null;
 let connectionStatus = 'OFFLINE';
 
+// SUPABASE TABANLI AUTH ADAPTER (Render Sıfırlansa Bile Oturum Silinmez)
+async function useSupabaseAuthState() {
+  const readData = async (id) => {
+    try {
+      const { data, error } = await supabase
+        .from('whatsapp_session')
+        .select('data')
+        .eq('id', id)
+        .single();
+      if (error || !data) return null;
+      return JSON.parse(data.data);
+    } catch {
+      return null;
+    }
+  };
+
+  const writeData = async (id, val) => {
+    try {
+      await supabase
+        .from('whatsapp_session')
+        .upsert({ id, data: JSON.stringify(val) });
+    } catch (err) {
+      console.error('Supabase auth kaydetme hatası:', err);
+    }
+  };
+
+  const removeData = async (id) => {
+    try {
+      await supabase.from('whatsapp_session').delete().eq('id', id);
+    } catch (err) {
+      console.error('Supabase auth silme hatası:', err);
+    }
+  };
+
+  const creds = (await readData('creds')) || require('@whiskeysockets/baileys').initAuthCreds();
+
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const data = {};
+          await Promise.all(
+            ids.map(async (id) => {
+              let value = await readData(`${type}-${id}`);
+              if (type === 'app-state-sync-key' && value) {
+                value = require('@whiskeysockets/baileys').proto.Message.AppStateSyncKeyData.fromObject(value);
+              }
+              data[id] = value;
+            })
+          );
+          return data;
+        },
+        set: async (data) => {
+          const tasks = [];
+          for (const category in data) {
+            for (const id in data[category]) {
+              const value = data[category][id];
+              const key = `${category}-${id}`;
+              tasks.push(value ? writeData(key, value) : removeData(key));
+            }
+          }
+          await Promise.all(tasks);
+        }
+      }
+    },
+    saveCreds: () => writeData('creds', creds)
+  };
+}
+
 async function connectToWhatsApp() {
   try {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    const { state, saveCreds } = await useSupabaseAuthState();
 
-    // KORUMALI & OPTİMİZE EDİLMİŞ SOKET
     sock = makeWASocket({
       auth: state,
       printQRInTerminal: false,
-      // 1. KOD 515 (Stream Error) / Zaman aşımı patlamalarını önler
       syncFullHistory: false,
       downloadHistory: false,
-      // 2. SOKET KOPMALARINI ENGELLER (Keep-Alive)
       keepAliveIntervalMs: 30000,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
@@ -52,26 +123,20 @@ async function connectToWhatsApp() {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-        console.log(`⚠️ Bağlantı kapandı. Hata Kodu: ${statusCode}. Oturum tamamen kapandı mı: ${isLoggedOut}`);
-
+        console.log(`⚠️ Bağlantı kapandı. Kod: ${statusCode}. Tamamen kapandı mı: ${isLoggedOut}`);
         connectionStatus = 'OFFLINE';
 
-        // 3. Ağ dalgalanmasında veya 515 hatasında KLASÖRÜ SİLMEDEN tık diye tekrar bağlan
         if (!isLoggedOut) {
-          console.log('🔄 Oturum geçerli. 3 saniye içinde sessizce tekrar bağlanılıyor...');
+          console.log('🔄 Oturum Supabase üzerinde geçerli. 3 saniye içinde tekrar bağlanılıyor...');
           setTimeout(() => connectToWhatsApp(), 3000);
         } else {
-          // Yalnızca telefondan elle oturum kapatıldıysa taze QR beklenir
-          console.log('❌ Kullanıcı oturumu tamamen kapattı. Taze QR bekleniyor...');
+          console.log('❌ Oturum kapatıldı. Supabase oturum verileri temizleniyor...');
           currentQr = null;
-          const authPath = path.join(__dirname, 'auth_info_baileys');
-          if (fs.existsSync(authPath)) {
-            try { fs.rmSync(authPath, { recursive: true, force: true }); } catch (e) {}
-          }
+          await supabase.from('whatsapp_session').delete().neq('id', '___');
           setTimeout(() => connectToWhatsApp(), 2000);
         }
       } else if (connection === 'open') {
-        console.log('✓ WhatsApp Bağlantısı Başarıyla Kuruldu!');
+        console.log('✓ WhatsApp Bağlantısı Başarıyla Kuruldu (Supabase Destekli)!');
         connectionStatus = 'CONNECTED';
         currentQr = null;
       }
@@ -102,7 +167,6 @@ async function connectToWhatsApp() {
               if (!cleanPhone.startsWith('90')) cleanPhone = '90' + cleanPhone;
 
               const targetJid = `${cleanPhone}@s.whatsapp.net`;
-
               const customerMessage = `Merhaba,\n\nLaptop Express üzerinden ilettiğiniz cihaz teklif talebiniz incelenmiştir.\n\n💰 *Firmamızın Değerleme Teklifi:* *${offerPrice} TL*\n\nTeklifi onaylıyorsanız mağazamızda veya adresinizde nakit ödeme işleminizi anında tamamlayabiliriz.`;
 
               await sock.sendMessage(targetJid, { text: customerMessage });
@@ -179,12 +243,7 @@ app.post('/logout', async (req, res) => {
       sock = null;
     }
 
-    const authPath = path.join(__dirname, 'auth_info_baileys');
-    if (fs.existsSync(authPath)) {
-      try {
-        fs.rmSync(authPath, { recursive: true, force: true });
-      } catch (e) {}
-    }
+    await supabase.from('whatsapp_session').delete().neq('id', '___');
 
     setTimeout(() => {
       connectToWhatsApp();
@@ -196,7 +255,6 @@ app.post('/logout', async (req, res) => {
   }
 });
 
-// SUNUCUYU ÖNCE BAŞLAT
 app.listen(PORT, () => {
   console.log(`Bot servisi ${PORT} portunda başarıyla ayağa kalktı.`);
   setTimeout(() => {
