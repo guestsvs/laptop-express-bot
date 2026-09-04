@@ -1,8 +1,9 @@
-const { default: makeWASocket, DisconnectReason, initAuthCreds, BufferJSON } = require('@whiskeysockets/baileys');
-const { Redis } = require('@upstash/redis');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -10,93 +11,28 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// Upstash Redis Bağlantısı (Render ortam değişkenlerinden otomatik çeker)
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
-
 let sock = null;
 let currentQr = null;
 let connectionStatus = 'OFFLINE';
 
-// UPSTASH REDIS AUTH ADAPTER (Render Sıfırlansa Bile Oturum Silinmez)
-async function useUpstashAuthState() {
-  const writeData = async (data, id) => {
-    try {
-      await redis.set(id, JSON.stringify(data, BufferJSON.replacer));
-    } catch (err) {
-      console.error('Redis yazma hatası:', err);
-    }
-  };
-
-  const readData = async (id) => {
-    try {
-      const data = await redis.get(id);
-      if (!data) return null;
-      const strData = typeof data === 'object' ? JSON.stringify(data) : data;
-      return JSON.parse(strData, BufferJSON.reviver);
-    } catch (err) {
-      return null;
-    }
-  };
-
-  const removeData = async (id) => {
-    try {
-      await redis.del(id);
-    } catch (err) {
-      console.error('Redis silme hatası:', err);
-    }
-  };
-
-  const creds = (await readData('creds')) || initAuthCreds();
-
-  return {
-    state: {
-      creds,
-      keys: {
-        get: async (type, ids) => {
-          const data = {};
-          await Promise.all(
-            ids.map(async (id) => {
-              let value = await readData(`${type}-${id}`);
-              if (type === 'app-state-sync-key' && value) {
-                value = require('@whiskeysockets/baileys').proto.Message.AppStateSyncKeyData.fromObject(value);
-              }
-              data[id] = value;
-            })
-          );
-          return data;
-        },
-        set: async (data) => {
-          const tasks = [];
-          for (const category in data) {
-            for (const id in data[category]) {
-              const value = data[category][id];
-              const key = `${category}-${id}`;
-              tasks.push(value ? writeData(value, key) : removeData(key));
-            }
-          }
-          await Promise.all(tasks);
-        }
-      }
-    },
-    saveCreds: () => writeData(creds, 'creds')
-  };
-}
-
 async function connectToWhatsApp() {
   try {
-    const { state, saveCreds } = await useUpstashAuthState();
+    // Yerel Dosya Sistemi Tabanlı Oturum (En Hızlı ve Bağlantı Koparmayan Yapı)
+    const authFolderPath = path.join(__dirname, 'auth_info_baileys');
+    const { state, saveCreds } = await useMultiFileAuthState(authFolderPath);
 
     sock = makeWASocket({
       auth: state,
       printQRInTerminal: false,
+      // Ağ gecikmelerine ve Render uykudan uyanmalarına karşı tolerans ayarları
       syncFullHistory: false,
       downloadHistory: false,
-      keepAliveIntervalMs: 30000,
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 60000,
+      keepAliveIntervalMs: 25000,
+      connectTimeoutMs: 90000,
+      defaultQueryTimeoutMs: 90000,
+      retryRequestOptions: {
+        maxRetries: 5
+      },
       browser: ['Laptop Express Bot', 'Chrome', '1.0.0']
     });
 
@@ -111,7 +47,7 @@ async function connectToWhatsApp() {
           currentQr = await QRCode.toDataURL(qr);
           console.log('⚡ Yeni QR Kod Üretildi!');
         } catch (err) {
-          console.error('QR Kod hatası:', err);
+          console.error('QR Kod oluşturma hatası:', err);
         }
       }
 
@@ -119,28 +55,34 @@ async function connectToWhatsApp() {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-        console.log(`⚠️ Bağlantı kapandı. Kod: ${statusCode}. Tamamen kapandı mı: ${isLoggedOut}`);
+        console.log(`⚠️ Bağlantı kapandı. Durum Kodu: ${statusCode}. Oturum kapatıldı mı: ${isLoggedOut}`);
         connectionStatus = 'OFFLINE';
 
         if (!isLoggedOut) {
-          console.log('🔄 Oturum Redis üzerinde saklı. 3 saniye içinde tekrar bağlanılıyor...');
+          // Ağ kopması, sunucu restartı veya geçici bağlantı kesilmelerinde DOSYALARI SİLMEDEN tekrar bağlan
+          console.log('🔄 Geçici kopma detected. 3 saniye içinde otomatik tekrar bağlanılıyor...');
           setTimeout(() => connectToWhatsApp(), 3000);
         } else {
-          console.log('❌ Oturum tamamen kapatıldı. Redis oturum verileri temizleniyor...');
+          // Sadece WhatsApp uygulamasından "Çıkış Yap" denildiyse temizle
+          console.log('❌ Kullanıcı oturumu kapattı. Temiz QR için klasör sıfırlanıyor...');
           currentQr = null;
-          try {
-            const keys = await redis.keys('*');
-            if (keys && keys.length > 0) await redis.del(...keys);
-          } catch (e) {}
+          if (fs.existsSync(authFolderPath)) {
+            try {
+              fs.rmSync(authFolderPath, { recursive: true, force: true });
+            } catch (e) {
+              console.error('Klasör silme hatası:', e);
+            }
+          }
           setTimeout(() => connectToWhatsApp(), 2000);
         }
       } else if (connection === 'open') {
-        console.log('✓ WhatsApp Bağlantısı Başarıyla Kuruldu (Redis Destekli)!');
+        console.log('✅ [BAŞARILI] WhatsApp Bağlantısı Tamamen Kuruldu!');
         connectionStatus = 'CONNECTED';
         currentQr = null;
       }
     });
 
+    // MÜŞTERİYE TEKLİF İLETME (Mesaj Yanıtlama Algılayıcı)
     sock.ev.on('messages.upsert', async (chatUpdate) => {
       try {
         const msg = chatUpdate.messages[0];
@@ -155,6 +97,7 @@ async function connectToWhatsApp() {
             contextInfo.quotedMessage.extendedTextMessage?.text ||
             '';
 
+          // Teklif bildirimi yanıtlandıysa
           if (quotedText.includes('TEKLİF TALEBİ') || quotedText.includes('Müşteri') || quotedText.includes('Telefon')) {
             const offerPrice = messageContent ? messageContent.trim() : null;
             const phoneMatch = quotedText.match(/(?:05|905|5)\d{8,9}/);
@@ -168,9 +111,11 @@ async function connectToWhatsApp() {
               const targetJid = `${cleanPhone}@s.whatsapp.net`;
               const customerMessage = `Merhaba,\n\nLaptop Express üzerinden ilettiğiniz cihaz teklif talebiniz incelenmiştir.\n\n💰 *Firmamızın Değerleme Teklifi:* *${offerPrice} TL*\n\nTeklifi onaylıyorsanız mağazamızda veya adresinizde nakit ödeme işleminizi anında tamamlayabiliriz.`;
 
+              // Müşteriye Gönder
               await sock.sendMessage(targetJid, { text: customerMessage });
-              console.log(`✅ [BAŞARILI] Müşteriye (${targetJid}) mesaj iletildi!`);
+              console.log(`✅ Müşteriye (${targetJid}) teklif iletildi: ${offerPrice} TL`);
 
+              // Kendine Onay Mesajı At
               const userNumber = sock.user.id.split(':')[0].split('@')[0];
               const myJid = `${userNumber}@s.whatsapp.net`;
 
@@ -181,11 +126,12 @@ async function connectToWhatsApp() {
           }
         }
       } catch (err) {
-        console.error('❌ [HATA] messages.upsert Hatası:', err);
+        console.error('❌ Müşteri mesaj yanıt hatası:', err);
       }
     });
+
   } catch (err) {
-    console.error('WhatsApp Bağlantı Hatası:', err);
+    console.error('WhatsApp Ana Bağlantı Hatası:', err);
   }
 }
 
@@ -242,10 +188,12 @@ app.post('/logout', async (req, res) => {
       sock = null;
     }
 
-    try {
-      const keys = await redis.keys('*');
-      if (keys && keys.length > 0) await redis.del(...keys);
-    } catch (e) {}
+    const authFolderPath = path.join(__dirname, 'auth_info_baileys');
+    if (fs.existsSync(authFolderPath)) {
+      try {
+        fs.rmSync(authFolderPath, { recursive: true, force: true });
+      } catch (e) {}
+    }
 
     setTimeout(() => {
       connectToWhatsApp();
@@ -258,7 +206,7 @@ app.post('/logout', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Bot servisi ${PORT} portunda başarıyla ayağa kalktı.`);
+  console.log(`Bot servisi ${PORT} portunda çalışıyor.`);
   setTimeout(() => {
     connectToWhatsApp();
   }, 2000);
