@@ -1,5 +1,5 @@
 const { default: makeWASocket, DisconnectReason, initAuthCreds, BufferJSON } = require('@whiskeysockets/baileys');
-const { createClient } = require('@supabase/supabase-js');
+const { Redis } = require('@upstash/redis');
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
@@ -10,47 +10,42 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// Supabase Bağlantısı
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://mvqkljryofiaaxbocsqq.supabase.co/rest/v1/';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im12cWtsanJ5b2ZpYWF4Ym9jc3FxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcxMzAzOTUsImV4cCI6MjEwMjcwNjM5NX0.FeeZZSnjhHfd8TX2DXv-4JakjYg3YoEWFIv_aHq5akg';
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// Upstash Redis Bağlantısı (Render ortam değişkenlerinden otomatik çeker)
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
 
 let sock = null;
 let currentQr = null;
 let connectionStatus = 'OFFLINE';
 
-// DÜZELTİLMİŞ VE SAF SUPABASE AUTH ADAPTER (Sonsuz Döngüyü Kırar)
-async function useSupabaseAuthState() {
+// UPSTASH REDIS AUTH ADAPTER (Render Sıfırlansa Bile Oturum Silinmez)
+async function useUpstashAuthState() {
   const writeData = async (data, id) => {
     try {
-      await supabase
-        .from('whatsapp_session')
-        .upsert({ id, data: JSON.stringify(data, BufferJSON.replacer) });
+      await redis.set(id, JSON.stringify(data, BufferJSON.replacer));
     } catch (err) {
-      console.error('Supabase write error:', err);
+      console.error('Redis yazma hatası:', err);
     }
   };
 
   const readData = async (id) => {
     try {
-      const { data, error } = await supabase
-        .from('whatsapp_session')
-        .select('data')
-        .eq('id', id)
-        .single();
-
-      if (error || !data) return null;
-      return JSON.parse(data.data, BufferJSON.reviver);
-    } catch {
+      const data = await redis.get(id);
+      if (!data) return null;
+      const strData = typeof data === 'object' ? JSON.stringify(data) : data;
+      return JSON.parse(strData, BufferJSON.reviver);
+    } catch (err) {
       return null;
     }
   };
 
   const removeData = async (id) => {
     try {
-      await supabase.from('whatsapp_session').delete().eq('id', id);
+      await redis.del(id);
     } catch (err) {
-      console.error('Supabase delete error:', err);
+      console.error('Redis silme hatası:', err);
     }
   };
 
@@ -92,7 +87,7 @@ async function useSupabaseAuthState() {
 
 async function connectToWhatsApp() {
   try {
-    const { state, saveCreds } = await useSupabaseAuthState();
+    const { state, saveCreds } = await useUpstashAuthState();
 
     sock = makeWASocket({
       auth: state,
@@ -128,16 +123,19 @@ async function connectToWhatsApp() {
         connectionStatus = 'OFFLINE';
 
         if (!isLoggedOut) {
-          console.log('🔄 Oturum geçerli. 3 saniye içinde tekrar bağlanılıyor...');
+          console.log('🔄 Oturum Redis üzerinde saklı. 3 saniye içinde tekrar bağlanılıyor...');
           setTimeout(() => connectToWhatsApp(), 3000);
         } else {
-          console.log('❌ Oturum kapatıldı. Supabase oturum verileri temizleniyor...');
+          console.log('❌ Oturum tamamen kapatıldı. Redis oturum verileri temizleniyor...');
           currentQr = null;
-          await supabase.from('whatsapp_session').delete().neq('id', '___');
+          try {
+            const keys = await redis.keys('*');
+            if (keys && keys.length > 0) await redis.del(...keys);
+          } catch (e) {}
           setTimeout(() => connectToWhatsApp(), 2000);
         }
       } else if (connection === 'open') {
-        console.log('✓ WhatsApp Bağlantısı Başarıyla Kuruldu (Supabase Destekli)!');
+        console.log('✓ WhatsApp Bağlantısı Başarıyla Kuruldu (Redis Destekli)!');
         connectionStatus = 'CONNECTED';
         currentQr = null;
       }
@@ -244,7 +242,10 @@ app.post('/logout', async (req, res) => {
       sock = null;
     }
 
-    await supabase.from('whatsapp_session').delete().neq('id', '___');
+    try {
+      const keys = await redis.keys('*');
+      if (keys && keys.length > 0) await redis.del(...keys);
+    } catch (e) {}
 
     setTimeout(() => {
       connectToWhatsApp();
