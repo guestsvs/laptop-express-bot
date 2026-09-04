@@ -19,9 +19,17 @@ async function connectToWhatsApp() {
   try {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
+    // KORUMALI & OPTİMİZE EDİLMİŞ SOKET
     sock = makeWASocket({
       auth: state,
-      printQRInTerminal: true,
+      printQRInTerminal: false,
+      // 1. KOD 515 (Stream Error) / Zaman aşımı patlamalarını önler
+      syncFullHistory: false,
+      downloadHistory: false,
+      // 2. SOKET KOPMALARINI ENGELLER (Keep-Alive)
+      keepAliveIntervalMs: 30000,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 60000,
       browser: ['Laptop Express Bot', 'Chrome', '1.0.0']
     });
 
@@ -41,12 +49,26 @@ async function connectToWhatsApp() {
       }
 
       if (connection === 'close') {
-        const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
-        console.log('Bağlantı kapandı, yeniden bağlanılıyor mu?:', shouldReconnect);
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+
+        console.log(`⚠️ Bağlantı kapandı. Hata Kodu: ${statusCode}. Oturum tamamen kapandı mı: ${isLoggedOut}`);
+
         connectionStatus = 'OFFLINE';
-        currentQr = null;
-        if (shouldReconnect) {
+
+        // 3. Ağ dalgalanmasında veya 515 hatasında KLASÖRÜ SİLMEDEN tık diye tekrar bağlan
+        if (!isLoggedOut) {
+          console.log('🔄 Oturum geçerli. 3 saniye içinde sessizce tekrar bağlanılıyor...');
           setTimeout(() => connectToWhatsApp(), 3000);
+        } else {
+          // Yalnızca telefondan elle oturum kapatıldıysa taze QR beklenir
+          console.log('❌ Kullanıcı oturumu tamamen kapattı. Taze QR bekleniyor...');
+          currentQr = null;
+          const authPath = path.join(__dirname, 'auth_info_baileys');
+          if (fs.existsSync(authPath)) {
+            try { fs.rmSync(authPath, { recursive: true, force: true }); } catch (e) {}
+          }
+          setTimeout(() => connectToWhatsApp(), 2000);
         }
       } else if (connection === 'open') {
         console.log('✓ WhatsApp Bağlantısı Başarıyla Kuruldu!');
@@ -86,7 +108,9 @@ async function connectToWhatsApp() {
               await sock.sendMessage(targetJid, { text: customerMessage });
               console.log(`✅ [BAŞARILI] Müşteriye (${targetJid}) mesaj iletildi!`);
 
-              const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+              const userNumber = sock.user.id.split(':')[0].split('@')[0];
+              const myJid = `${userNumber}@s.whatsapp.net`;
+
               await sock.sendMessage(myJid, {
                 text: `✓ *${offerPrice} TL* teklifiniz müşteriye (${cleanPhone}) başarıyla iletildi!`
               });
@@ -107,7 +131,7 @@ app.get('/status', (req, res) => {
   res.json({
     status: connectionStatus,
     qr: currentQr,
-    user: sock?.user?.id ? sock.user.id.split(':')[0] : null
+    user: sock?.user?.id ? sock.user.id.split(':')[0].split('@')[0] : null
   });
 });
 
@@ -129,7 +153,9 @@ app.post('/send-offer', async (req, res) => {
       `💡 *Fiyat Vermek İçin:* Bu mesaja "Yanıtla (Reply)" yaparak vermek istediğiniz rakamı yazın (Örn: 18500).`;
 
     if (sock && connectionStatus === 'CONNECTED') {
-      const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+      const userNumber = sock.user.id.split(':')[0].split('@')[0];
+      const myJid = `${userNumber}@s.whatsapp.net`;
+
       await sock.sendMessage(myJid, { text: adminNotification });
       return res.json({ success: true, message: 'Bildirim gönderildi.' });
     } else {
@@ -170,10 +196,9 @@ app.post('/logout', async (req, res) => {
   }
 });
 
-// SUNUCUYU ÖNCE BAŞLAT (Render Portu Hemen Görsün)
+// SUNUCUYU ÖNCE BAŞLAT
 app.listen(PORT, () => {
   console.log(`Bot servisi ${PORT} portunda başarıyla ayağa kalktı.`);
-  // Render'ın port kontrolünden geçmesi için bağlantıyı hafif gecikmeli başlatıyoruz
   setTimeout(() => {
     connectToWhatsApp();
   }, 2000);
