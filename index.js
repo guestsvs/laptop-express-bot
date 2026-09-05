@@ -11,7 +11,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// Render Environment ayarlarından gelecek olan Grup JID Adresi
+// Render Environment'tan gelen Grup JID Adresi
 let TARGET_GROUP_JID = process.env.TARGET_GROUP_JID || null;
 
 let sock = null;
@@ -88,12 +88,11 @@ async function connectToWhatsApp() {
         const fromJid = msg.key.remoteJid;
         const messageContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
 
-        // GRUP ID TESPİTİ: Gruba bir şey yazıldığında JID adresini loga basar
         if (fromJid.endsWith('@g.us')) {
           console.log(`📌 GRUP MESAJI ALGILANDI! Grup JID Adresi: ${fromJid}`);
         }
 
-        // MÜŞTERİYE TEKLİF İLETME (Mesaj Yanıtlandığında)
+        // MÜŞTERİYE TEKLİF İLETME (Yanıtla Yapıldığında)
         const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
 
         if (contextInfo && contextInfo.quotedMessage) {
@@ -119,7 +118,7 @@ async function connectToWhatsApp() {
               await sock.sendMessage(targetJid, { text: customerMessage });
               console.log(`✅ Müşteriye (${targetJid}) teklif iletildi: ${offerPrice} TL`);
 
-              // Gruba Onay Bildirimi Geç
+              // Yanıt verilen sohbete (Gruba) onay bildirimi geç
               await sock.sendMessage(fromJid, {
                 text: `✓ *${offerPrice} TL* teklifiniz müşteriye (${cleanPhone}) başarıyla iletildi!`
               });
@@ -163,20 +162,32 @@ app.post('/send-offer', async (req, res) => {
       `💡 *Fiyat Vermek İçin:* Bu mesaja "Yanıtla (Reply)" yaparak vermek istediğiniz rakamı yazın (Örn: 18500).`;
 
     if (sock && connectionStatus === 'CONNECTED') {
-      let targetJid = TARGET_GROUP_JID;
+      let targetJid = process.env.TARGET_GROUP_JID ? process.env.TARGET_GROUP_JID.trim() : null;
 
-      // Eğer henüz grup eklenmemişse varsayılan olarak kendi sohbetine atar
-      if (!targetJid) {
-        const userNumber = sock.user.id.split(':')[0].split('@')[0];
-        targetJid = `${userNumber}@s.whatsapp.net`;
+      if (targetJid) {
+        try {
+          // Gruba göndermeden önce grup bilgilerini senkronize et (Internal Server Error önlemi)
+          await sock.groupMetadata(targetJid).catch(() => null);
+          await sock.sendMessage(targetJid, { text: adminNotification });
+          console.log(`✅ Teklif bildirimi gruba (${targetJid}) başarıyla gönderildi.`);
+          return res.json({ success: true, message: 'Gruba bildirim gönderildi.' });
+        } catch (groupErr) {
+          console.error('❌ Gruba mesaj atılamadı, kişisel sohbete düşülüyor:', groupErr);
+        }
       }
 
-      await sock.sendMessage(targetJid, { text: adminNotification });
+      // Grup yoksa veya hata verdiyse doğrudan kendi sohbetine gönder
+      const userNumber = sock.user.id.split(':')[0].split('@')[0];
+      const myJid = `${userNumber}@s.whatsapp.net`;
+      await sock.sendMessage(myJid, { text: adminNotification });
+      console.log(`✅ Teklif bildirimi kişisel sohbetinize (${myJid}) gönderildi.`);
+
       return res.json({ success: true, message: 'Bildirim gönderildi.' });
     } else {
       return res.status(503).json({ error: 'WhatsApp botu henüz bağlı değil' });
     }
   } catch (error) {
+    console.error('send-offer Hata:', error);
     return res.status(500).json({ error: error.message });
   }
 });
@@ -207,7 +218,7 @@ app.post('/logout', async (req, res) => {
 
     return res.json({ success: true, message: 'Oturum kapatıldı' });
   } catch (err) {
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: err.message });
   }
 });
 
