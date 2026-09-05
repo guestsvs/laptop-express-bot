@@ -11,20 +11,21 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
+// Render Environment ayarlarından gelecek olan Grup JID Adresi
+let TARGET_GROUP_JID = process.env.TARGET_GROUP_JID || null;
+
 let sock = null;
 let currentQr = null;
 let connectionStatus = 'OFFLINE';
 
 async function connectToWhatsApp() {
   try {
-    // Yerel Dosya Sistemi Tabanlı Oturum (En Hızlı ve Bağlantı Koparmayan Yapı)
     const authFolderPath = path.join(__dirname, 'auth_info_baileys');
     const { state, saveCreds } = await useMultiFileAuthState(authFolderPath);
 
     sock = makeWASocket({
       auth: state,
       printQRInTerminal: false,
-      // Ağ gecikmelerine ve Render uykudan uyanmalarına karşı tolerans ayarları
       syncFullHistory: false,
       downloadHistory: false,
       keepAliveIntervalMs: 25000,
@@ -59,19 +60,15 @@ async function connectToWhatsApp() {
         connectionStatus = 'OFFLINE';
 
         if (!isLoggedOut) {
-          // Ağ kopması, sunucu restartı veya geçici bağlantı kesilmelerinde DOSYALARI SİLMEDEN tekrar bağlan
-          console.log('🔄 Geçici kopma detected. 3 saniye içinde otomatik tekrar bağlanılıyor...');
+          console.log('🔄 Geçici kopma. Tekrar bağlanılıyor...');
           setTimeout(() => connectToWhatsApp(), 3000);
         } else {
-          // Sadece WhatsApp uygulamasından "Çıkış Yap" denildiyse temizle
-          console.log('❌ Kullanıcı oturumu kapattı. Temiz QR için klasör sıfırlanıyor...');
+          console.log('❌ Kullanıcı oturumu kapattı. Klasör sıfırlanıyor...');
           currentQr = null;
           if (fs.existsSync(authFolderPath)) {
             try {
               fs.rmSync(authFolderPath, { recursive: true, force: true });
-            } catch (e) {
-              console.error('Klasör silme hatası:', e);
-            }
+            } catch (e) {}
           }
           setTimeout(() => connectToWhatsApp(), 2000);
         }
@@ -82,13 +79,21 @@ async function connectToWhatsApp() {
       }
     });
 
-    // MÜŞTERİYE TEKLİF İLETME (Mesaj Yanıtlama Algılayıcı)
+    // MESAJ İŞLEME MEKANİZMASI
     sock.ev.on('messages.upsert', async (chatUpdate) => {
       try {
         const msg = chatUpdate.messages[0];
         if (!msg || !msg.message) return;
 
+        const fromJid = msg.key.remoteJid;
         const messageContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
+
+        // GRUP ID TESPİTİ: Gruba bir şey yazıldığında JID adresini loga basar
+        if (fromJid.endsWith('@g.us')) {
+          console.log(`📌 GRUP MESAJI ALGILANDI! Grup JID Adresi: ${fromJid}`);
+        }
+
+        // MÜŞTERİYE TEKLİF İLETME (Mesaj Yanıtlandığında)
         const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
 
         if (contextInfo && contextInfo.quotedMessage) {
@@ -97,7 +102,6 @@ async function connectToWhatsApp() {
             contextInfo.quotedMessage.extendedTextMessage?.text ||
             '';
 
-          // Teklif bildirimi yanıtlandıysa
           if (quotedText.includes('TEKLİF TALEBİ') || quotedText.includes('Müşteri') || quotedText.includes('Telefon')) {
             const offerPrice = messageContent ? messageContent.trim() : null;
             const phoneMatch = quotedText.match(/(?:05|905|5)\d{8,9}/);
@@ -115,18 +119,15 @@ async function connectToWhatsApp() {
               await sock.sendMessage(targetJid, { text: customerMessage });
               console.log(`✅ Müşteriye (${targetJid}) teklif iletildi: ${offerPrice} TL`);
 
-              // Kendine Onay Mesajı At
-              const userNumber = sock.user.id.split(':')[0].split('@')[0];
-              const myJid = `${userNumber}@s.whatsapp.net`;
-
-              await sock.sendMessage(myJid, {
+              // Gruba Onay Bildirimi Geç
+              await sock.sendMessage(fromJid, {
                 text: `✓ *${offerPrice} TL* teklifiniz müşteriye (${cleanPhone}) başarıyla iletildi!`
               });
             }
           }
         }
       } catch (err) {
-        console.error('❌ Müşteri mesaj yanıt hatası:', err);
+        console.error('❌ Mesaj işleme hatası:', err);
       }
     });
 
@@ -162,10 +163,15 @@ app.post('/send-offer', async (req, res) => {
       `💡 *Fiyat Vermek İçin:* Bu mesaja "Yanıtla (Reply)" yaparak vermek istediğiniz rakamı yazın (Örn: 18500).`;
 
     if (sock && connectionStatus === 'CONNECTED') {
-      const userNumber = sock.user.id.split(':')[0].split('@')[0];
-      const myJid = `${userNumber}@s.whatsapp.net`;
+      let targetJid = TARGET_GROUP_JID;
 
-      await sock.sendMessage(myJid, { text: adminNotification });
+      // Eğer henüz grup eklenmemişse varsayılan olarak kendi sohbetine atar
+      if (!targetJid) {
+        const userNumber = sock.user.id.split(':')[0].split('@')[0];
+        targetJid = `${userNumber}@s.whatsapp.net`;
+      }
+
+      await sock.sendMessage(targetJid, { text: adminNotification });
       return res.json({ success: true, message: 'Bildirim gönderildi.' });
     } else {
       return res.status(503).json({ error: 'WhatsApp botu henüz bağlı değil' });
@@ -201,7 +207,7 @@ app.post('/logout', async (req, res) => {
 
     return res.json({ success: true, message: 'Oturum kapatıldı' });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: error.message });
   }
 });
 
