@@ -11,8 +11,8 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// Render Environment'tan gelen Grup JID Adresi
-let TARGET_GROUP_JID = process.env.TARGET_GROUP_JID || null;
+// GRUP JID ADRESİ DOĞRUDAN KODA SABİTLENDİ
+const TARGET_GROUP_JID = '120363405358488380@g.us';
 
 let sock = null;
 let currentQr = null;
@@ -162,27 +162,14 @@ app.post('/send-offer', async (req, res) => {
       `💡 *Fiyat Vermek İçin:* Bu mesaja "Yanıtla (Reply)" yaparak vermek istediğiniz rakamı yazın (Örn: 18500).`;
 
     if (sock && connectionStatus === 'CONNECTED') {
-      let targetJid = process.env.TARGET_GROUP_JID ? process.env.TARGET_GROUP_JID.trim() : null;
-
-      if (targetJid) {
-        try {
-          // Gruba göndermeden önce grup bilgilerini senkronize et (Internal Server Error önlemi)
-          await sock.groupMetadata(targetJid).catch(() => null);
-          await sock.sendMessage(targetJid, { text: adminNotification });
-          console.log(`✅ Teklif bildirimi gruba (${targetJid}) başarıyla gönderildi.`);
-          return res.json({ success: true, message: 'Gruba bildirim gönderildi.' });
-        } catch (groupErr) {
-          console.error('❌ Gruba mesaj atılamadı, kişisel sohbete düşülüyor:', groupErr);
-        }
+      try {
+        await sock.sendMessage(TARGET_GROUP_JID, { text: adminNotification });
+        console.log(`✅ Teklif bildirimi gruba (${TARGET_GROUP_JID}) başarıyla gönderildi.`);
+        return res.json({ success: true, message: 'Gruba bildirim gönderildi.' });
+      } catch (groupErr) {
+        console.error('❌ Gruba mesaj atılamadı:', groupErr);
+        return res.status(500).json({ error: 'Gruba mesaj gönderilemedi' });
       }
-
-      // Grup yoksa veya hata verdiyse doğrudan kendi sohbetine gönder
-      const userNumber = sock.user.id.split(':')[0].split('@')[0];
-      const myJid = `${userNumber}@s.whatsapp.net`;
-      await sock.sendMessage(myJid, { text: adminNotification });
-      console.log(`✅ Teklif bildirimi kişisel sohbetinize (${myJid}) gönderildi.`);
-
-      return res.json({ success: true, message: 'Bildirim gönderildi.' });
     } else {
       return res.status(503).json({ error: 'WhatsApp botu henüz bağlı değil' });
     }
