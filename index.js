@@ -12,16 +12,16 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 const TARGET_GROUP_NAME = 'BOT'; 
 
-// VERİTABANI DOSYALARI
-const DB_FILE = path.join(__dirname, 'completed_offers.json'); // Tamamlanan işlemleri tutar
-const CONFIG_FILE = path.join(__dirname, 'bot_config.json');   // Grubun kalıcı JID kodunu tutar
+// KALICI HAFIZA VE VERİTABANI DOSYALARI
+const DB_FILE = path.join(__dirname, 'completed_offers.json'); 
+const CONFIG_FILE = path.join(__dirname, 'bot_config.json');   
 
 let sock = null;
 let currentQr = null;
 let connectionStatus = 'OFFLINE';
 let cachedGroupJid = null; 
 
-// --- VERİTABANI VE AYAR FONKSİYONLARI ---
+// --- VERİTABANI YÖNETİMİ ---
 function getCompletedOffers() {
   if (fs.existsSync(DB_FILE)) {
     try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch (e) { return []; }
@@ -32,10 +32,19 @@ function getCompletedOffers() {
 function saveCompletedOffer(offerData) {
   let offers = getCompletedOffers();
   offers.push(offerData);
-  if (offers.length > 50) offers = offers.slice(-50); // Son 50 işlemi tut
+  if (offers.length > 200) offers = offers.slice(-200); // Veritabanı şişmesin diye son 200 işlemi tutar
   fs.writeFileSync(DB_FILE, JSON.stringify(offers, null, 2));
 }
 
+// Toplam istatistik hesaplama
+function getStats() {
+  const offers = getCompletedOffers();
+  const totalOffers = offers.length;
+  const totalVolume = offers.reduce((sum, offer) => sum + (parseFloat(offer.price) || 0), 0);
+  return { totalOffers, totalVolume };
+}
+
+// --- JID (GRUP ID) KALICI HAFIZA ---
 function getSavedGroupJid() {
   if (cachedGroupJid) return cachedGroupJid;
   if (fs.existsSync(CONFIG_FILE)) {
@@ -54,32 +63,28 @@ function saveGroupJid(jid) {
   if (jid && jid !== cachedGroupJid) {
     fs.writeFileSync(CONFIG_FILE, JSON.stringify({ groupJid: jid }, null, 2));
     cachedGroupJid = jid;
-    console.log(`💾 Grubun kalıcı JID kodu sisteme kazındı: ${jid}`);
   }
 }
-// ---------------------------------------
 
 async function findGroupJidByName(groupName) {
   let savedJid = getSavedGroupJid();
-  if (savedJid) return savedJid; // Varsa direkt kalıcı bellekten çek
+  if (savedJid) return savedJid;
 
   try {
     const groupList = await sock.groupFetchAllParticipating();
     for (const jid in groupList) {
       if (groupList[jid].subject && groupList[jid].subject.trim().toLowerCase() === groupName.trim().toLowerCase()) {
         let cleanJid = jid;
-        if (cleanJid.endsWith('ag.us')) cleanJid = cleanJid.replace('ag.us', '@g.us'); // Hata düzeltme
-        
-        saveGroupJid(cleanJid); // Bulunca kalıcı hafızaya yaz
+        if (cleanJid.endsWith('ag.us')) cleanJid = cleanJid.replace('ag.us', '@g.us');
+        saveGroupJid(cleanJid); 
         return cleanJid;
       }
     }
-  } catch (e) {
-    console.error('Grup arama hatası:', e);
-  }
+  } catch (e) {}
   return null;
 }
 
+// --- BAĞLANTI ANA GÖVDESİ ---
 async function connectToWhatsApp() {
   try {
     const authFolderPath = path.join(__dirname, 'auth_info_baileys');
@@ -114,7 +119,7 @@ async function connectToWhatsApp() {
         const notifyJid = getSavedGroupJid();
         if (notifyJid && connectionStatus === 'CONNECTED') {
           try {
-            await sock.sendMessage(notifyJid, { text: `🔴 *[SİSTEM DEVRE DIŞI]*\n\nBağlantı kesildi. Yeniden bağlanılıyor...` }).catch(() => null);
+            await sock.sendMessage(notifyJid, { text: `🔴 *[SİSTEM DEVRE DIŞI]*\nBot bağlantısı kesildi. Yeniden bağlanıyor...` }).catch(() => null);
           } catch (e) {}
         }
 
@@ -135,14 +140,14 @@ async function connectToWhatsApp() {
           const groupJid = await findGroupJidByName(TARGET_GROUP_NAME);
           if (groupJid) {
             await sock.sendMessage(groupJid, {
-              text: `🟢 *[SİSTEM AKTİF]*\n\nLaptop Express Bot başarıyla başlatıldı ve dinlemede.\n\n_Biten işlemleri görmek için gruba *\/tamamlananlar* yazabilirsiniz._`
+              text: `🟢 *[SİSTEM AKTİF]*\n\nLaptop Express CRM Bot başarıyla başlatıldı.\nKomutları görmek için gruba */yardım* yazabilirsiniz.`
             }).catch(() => null);
           }
         }, 3000);
       }
     });
 
-    // MESAJLARI DİNLEME VE KOMUT YÖNETİMİ
+    // --- MESAJ (KOMUT) İŞLEYİCİ MANTIK ---
     sock.ev.on('messages.upsert', async (chatUpdate) => {
       try {
         const msg = chatUpdate.messages[0];
@@ -151,64 +156,99 @@ async function connectToWhatsApp() {
         let fromJid = msg.key.remoteJid;
         if (fromJid.endsWith('ag.us')) fromJid = fromJid.replace('ag.us', '@g.us');
         
-        // Gruptan herhangi bir mesaj gelirse (nokta bile olsa) ID'yi garantiye al
-        if (fromJid.endsWith('@g.us')) {
-          saveGroupJid(fromJid);
-        }
+        if (fromJid.endsWith('@g.us')) saveGroupJid(fromJid);
 
         const messageContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+        const command = messageContent.trim().toLowerCase();
 
-        // DİSCORD TARZI KOMUT: /tamamlananlar
-        if (messageContent.trim().toLowerCase() === '/tamamlananlar') {
-          const offers = getCompletedOffers();
+        // 1. DİREKT GRUBA YAZILAN BİLGİ KOMUTLARI
+        if (command === '/yardım') {
+          const helpText = `🤖 *LAPTOP EXPRESS BOT KOMUTLARI* 🤖\n\n` +
+            `📌 *GENEL KOMUTLAR*\n` +
+            `• */yardım* : Bu listeyi gösterir.\n` +
+            `• */tamamlananlar* : Başarıyla fiyat verilen son 5 işlemi listeler.\n` +
+            `• */istatistik* : Toplam işlem sayısını ve teklif hacmini gösterir.\n\n` +
+            `⚡ *HIZLI YANIT KOMUTLARI (Teklif mesajını "Yanıtla" yaparak kullanılır)*\n` +
+            `• *[Fiyat]* (Örn: 18500) : Müşteriye doğrudan teklif sunar ve veritabanına kaydeder.\n` +
+            `• */eksik* : Müşteriden batarya sağlığı ve detaylı fotoğraf talep eder.\n` +
+            `• */red* : Cihazın alım kriterlerine uymadığını kibarca bildirir.`;
           
+          await sock.sendMessage(fromJid, { text: helpText });
+          return;
+        }
+
+        if (command === '/tamamlananlar') {
+          const offers = getCompletedOffers();
           if (offers.length === 0) {
             await sock.sendMessage(fromJid, { text: '📭 *Kayıt Bulunamadı:*\nHenüz tamamlanan bir teklif işlemi yok.' });
             return;
           }
-
           const last5 = offers.slice(-5).reverse();
           let replyText = '✅ *SON 5 TAMAMLANAN TEKLİF*\n\n';
-          
           last5.forEach((o, i) => {
             replyText += `${i + 1}️⃣ *Müşteri:* ${o.name}\n💰 *Fiyat:* ${o.price} TL\n📅 *Tarih:* ${o.date}\n📞 *İletişim:* ${o.phone}\n\n`;
           });
-
           await sock.sendMessage(fromJid, { text: replyText.trim() });
           return; 
         }
 
-        // MÜŞTERİYE TEKLİF İLETME VE KAYIT ALTINA ALMA
+        if (command === '/istatistik') {
+          const stats = getStats();
+          const statText = `📊 *MAĞAZA İSTATİSTİKLERİ*\n\n` +
+            `📦 *Toplam Verilen Teklif:* ${stats.totalOffers} adet\n` +
+            `💸 *Toplam Teklif Hacmi:* ${stats.totalVolume.toLocaleString('tr-TR')} TL`;
+          await sock.sendMessage(fromJid, { text: statText });
+          return;
+        }
+
+        // 2. MÜŞTERİ TEKLİFİNE VERİLEN YANITLAR
         const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
         if (contextInfo && contextInfo.quotedMessage) {
           const quotedText = contextInfo.quotedMessage.conversation || contextInfo.quotedMessage.extendedTextMessage?.text || '';
 
-          if (quotedText.includes('TEKLİF TALEBİ') || quotedText.includes('Müşteri')) {
-            const offerPrice = messageContent ? messageContent.trim() : null;
+          if (quotedText.includes('YENİ TEKLİF TALEBİ') || quotedText.includes('Müşteri')) {
             const phoneMatch = quotedText.match(/(?:05|905|5)\d{8,9}/);
             const nameMatch = quotedText.match(/Müşteri:\s*([^\n\*]+)/);
             const customerName = nameMatch ? nameMatch[1].trim() : 'Belirtilmedi';
 
-            if (phoneMatch && offerPrice && !isNaN(offerPrice)) {
-              let rawPhone = phoneMatch[0].trim();
-              let cleanPhone = rawPhone.replace(/\D/g, '');
+            if (phoneMatch) {
+              let cleanPhone = phoneMatch[0].trim().replace(/\D/g, '');
               if (cleanPhone.startsWith('0')) cleanPhone = cleanPhone.substring(1);
               if (!cleanPhone.startsWith('90')) cleanPhone = '90' + cleanPhone;
-
               const targetJid = `${cleanPhone}@s.whatsapp.net`;
-              const customerMessage = `Merhaba,\n\nLaptop Express üzerinden ilettiğiniz cihaz teklif talebiniz incelenmiştir.\n\n💰 *Firmamızın Değerleme Teklifi:* *${offerPrice} TL*\n\nTeklifi onaylıyorsanız mağazamızda veya adresinizde nakit ödeme işleminizi anında tamamlayabiliriz.`;
 
-              // Müşteriye Gönder
-              await sock.sendMessage(targetJid, { text: customerMessage });
+              // YANIT 1: EKSİK BİLGİ TALEBİ (/eksik)
+              if (command === '/eksik') {
+                const eksikMesaj = `Merhaba,\n\nLaptop Express'e ilettiğiniz cihaz teklif talebiniz uzmanlarımız tarafından incelenmektedir.\n\nCihazınıza en doğru ve net değeri biçebilmemiz için lütfen *batarya sağlığı (pil durumu)* bilgisini ve cihazın detaylı fotoğraflarını (kasa, ekran, klavye) bu sohbete iletir misiniz?`;
+                await sock.sendMessage(targetJid, { text: eksikMesaj });
+                await sock.sendMessage(fromJid, { text: `⚠️ Müşteriye (${cleanPhone}) eksik bilgi ve fotoğraf talebi gönderildi.` });
+                return;
+              }
 
-              // Veritabanına Kaydet
-              const now = new Date();
-              const dateStr = now.toLocaleDateString('tr-TR') + ' ' + now.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
-              
-              saveCompletedOffer({ name: customerName, phone: cleanPhone, price: offerPrice, date: dateStr });
+              // YANIT 2: TEKLİF REDDİ (/red)
+              if (command === '/red') {
+                const redMesaj = `Merhaba,\n\nLaptop Express'e ilettiğiniz teklif talebiniz incelenmiştir.\n\nMaalesef ilettiğiniz cihaz modeliniz veya durumu şu anki mağaza alım kriterlerimize uymamaktadır. İlginize teşekkür eder, iyi günler dileriz.`;
+                await sock.sendMessage(targetJid, { text: redMesaj });
+                await sock.sendMessage(fromJid, { text: `❌ Müşteriye (${cleanPhone}) ret mesajı iletildi.` });
+                return;
+              }
 
-              // Gruba Onay Bildirimi
-              await sock.sendMessage(fromJid, { text: `✓ *${offerPrice} TL* teklif müşteriye başarıyla iletildi ve kayıt altına alındı.` });
+              // YANIT 3: FİYAT TEKLİFİ VERME (Sadece rakam yazıldığında)
+              const offerPrice = command;
+              if (offerPrice && !isNaN(offerPrice)) {
+                const customerMessage = `Merhaba,\n\nLaptop Express üzerinden ilettiğiniz cihaz teklif talebiniz incelenmiştir.\n\n💰 *Firmamızın Değerleme Teklifi:* *${offerPrice} TL*\n\nTeklifi onaylıyorsanız mağazamızda veya adresinizde nakit ödeme işleminizi anında tamamlayabiliriz.`;
+                
+                // Müşteriye Gönder
+                await sock.sendMessage(targetJid, { text: customerMessage });
+
+                // DB'ye Kaydet
+                const now = new Date();
+                const dateStr = now.toLocaleDateString('tr-TR') + ' ' + now.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+                saveCompletedOffer({ name: customerName, phone: cleanPhone, price: offerPrice, date: dateStr });
+
+                // Gruba Onay Bildirimi
+                await sock.sendMessage(fromJid, { text: `✓ *${offerPrice} TL* teklif müşteriye başarıyla iletildi ve kayıt altına alındı.` });
+              }
             }
           }
         }
@@ -222,6 +262,7 @@ async function connectToWhatsApp() {
   }
 }
 
+// ROTALAR
 app.get('/status', (req, res) => {
   res.json({
     status: connectionStatus,
@@ -243,7 +284,10 @@ app.post('/send-offer', async (req, res) => {
       `🎮 *Ekran Kartı:* ${offer.ekran_karti || '-'}\n` +
       `⚡ *RAM / SSD:* ${offer.ram || '-'} / ${offer.ssd || '-'}\n` +
       `✨ *Kozmetik / Durum:* ${offer.kozmetik || '-'} / ${offer.kullanim_durumu || '-'}\n\n` +
-      `💡 *Fiyat Vermek İçin:* Bu mesaja "Yanıtla (Reply)" yaparak vermek istediğiniz rakamı (sadece sayı olarak, örn: 18500) yazın.`;
+      `💡 *İşlem Yapmak İçin Bu Mesajı "Yanıtla (Reply)" Yaparak Şunları Yazın:*\n` +
+      `• *Rakam:* Fiyat teklifi iletir (Örn: 18500)\n` +
+      `• */eksik* : Fotoğraf ve batarya bilgisi ister\n` +
+      `• */red* : Kibarca reddeder`;
 
     if (sock && connectionStatus === 'CONNECTED') {
       const groupJid = await findGroupJidByName(TARGET_GROUP_NAME);
@@ -253,12 +297,10 @@ app.post('/send-offer', async (req, res) => {
           await sock.sendMessage(groupJid, { text: adminNotification });
           return res.json({ success: true, message: 'Gruba bildirim gönderildi.' });
         } catch (sendErr) {
-          console.error('Gruba atılamadı:', sendErr);
           return res.status(500).json({ error: 'Gruba mesaj atılamadı.' });
         }
       } else {
-        // GRUP BULUNAMAZSA KİŞİSEL SOHBETE GİTMESİ TAMAMEN İPTAL EDİLDİ!
-        console.error(`⚠️ "${TARGET_GROUP_NAME}" isimli grup bulunamadı. Mesaj iptal edildi.`);
+        // Kişisel sohbete yönlendirme tamamen silindi! Sadece gruba atar veya iptal eder.
         return res.status(404).json({ error: 'WhatsApp grubu bulunamadı, mesaj gönderimi iptal edildi.' });
       }
     } else {
