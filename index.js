@@ -10,7 +10,8 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
-const TARGET_GROUP_NAME = 'BOT'; 
+// YENİ GRUP İSMİ: LAPTOP EXPRESS BOT
+const TARGET_GROUP_NAME = 'LAPTOP EXPRESS BOT'; 
 
 // KALICI HAFIZA VE VERİTABANI DOSYALARI
 const DB_FILE = path.join(__dirname, 'completed_offers.json'); 
@@ -32,11 +33,10 @@ function getCompletedOffers() {
 function saveCompletedOffer(offerData) {
   let offers = getCompletedOffers();
   offers.push(offerData);
-  if (offers.length > 200) offers = offers.slice(-200); // Veritabanı şişmesin diye son 200 işlemi tutar
+  if (offers.length > 200) offers = offers.slice(-200);
   fs.writeFileSync(DB_FILE, JSON.stringify(offers, null, 2));
 }
 
-// Toplam istatistik hesaplama
 function getStats() {
   const offers = getCompletedOffers();
   const totalOffers = offers.length;
@@ -161,13 +161,14 @@ async function connectToWhatsApp() {
         const messageContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
         const command = messageContent.trim().toLowerCase();
 
-        // 1. DİREKT GRUBA YAZILAN BİLGİ KOMUTLARI
-        if (command === '/yardım') {
+        // 1. DİREKT GRUBA YAZILAN BİLGİ VE YÖNETİM KOMUTLARI
+        if (command === '/yardım' || command === '!yardım') {
           const helpText = `🤖 *LAPTOP EXPRESS BOT KOMUTLARI* 🤖\n\n` +
             `📌 *GENEL KOMUTLAR*\n` +
             `• */yardım* : Bu listeyi gösterir.\n` +
             `• */tamamlananlar* : Başarıyla fiyat verilen son 5 işlemi listeler.\n` +
-            `• */istatistik* : Toplam işlem sayısını ve teklif hacmini gösterir.\n\n` +
+            `• */istatistik* : Toplam işlem sayısını ve teklif hacmini gösterir.\n` +
+            `• *!sil* (veya */sil*) : Grup sohbet geçmişini temizler.\n\n` +
             `⚡ *HIZLI YANIT KOMUTLARI (Teklif mesajını "Yanıtla" yaparak kullanılır)*\n` +
             `• *[Fiyat]* (Örn: 18500) : Müşteriye doğrudan teklif sunar ve veritabanına kaydeder.\n` +
             `• */eksik* : Müşteriden batarya sağlığı ve detaylı fotoğraf talep eder.\n` +
@@ -177,7 +178,20 @@ async function connectToWhatsApp() {
           return;
         }
 
-        if (command === '/tamamlananlar') {
+        // SOHBETİ TEMİZLEME (!sil) KOMUTU
+        if (command === '!sil' || command === '/sil') {
+          try {
+            await sock.chatModify(
+              { delete: true, lastMessages: [{ key: msg.key, messageTimestamp: msg.messageTimestamp }] },
+              fromJid
+            );
+          } catch (cleanErr) {
+            await sock.sendMessage(fromJid, { text: `⚠️ Sohbet temizleme işlemi başarısız oldu.` });
+          }
+          return;
+        }
+
+        if (command === '/tamamlananlar' || command === '!tamamlananlar') {
           const offers = getCompletedOffers();
           if (offers.length === 0) {
             await sock.sendMessage(fromJid, { text: '📭 *Kayıt Bulunamadı:*\nHenüz tamamlanan bir teklif işlemi yok.' });
@@ -192,7 +206,7 @@ async function connectToWhatsApp() {
           return; 
         }
 
-        if (command === '/istatistik') {
+        if (command === '/istatistik' || command === '!istatistik') {
           const stats = getStats();
           const statText = `📊 *MAĞAZA İSTATİSTİKLERİ*\n\n` +
             `📦 *Toplam Verilen Teklif:* ${stats.totalOffers} adet\n` +
@@ -218,7 +232,7 @@ async function connectToWhatsApp() {
               const targetJid = `${cleanPhone}@s.whatsapp.net`;
 
               // YANIT 1: EKSİK BİLGİ TALEBİ (/eksik)
-              if (command === '/eksik') {
+              if (command === '/eksik' || command === '!eksik') {
                 const eksikMesaj = `Merhaba,\n\nLaptop Express'e ilettiğiniz cihaz teklif talebiniz uzmanlarımız tarafından incelenmektedir.\n\nCihazınıza en doğru ve net değeri biçebilmemiz için lütfen *batarya sağlığı (pil durumu)* bilgisini ve cihazın detaylı fotoğraflarını (kasa, ekran, klavye) bu sohbete iletir misiniz?`;
                 await sock.sendMessage(targetJid, { text: eksikMesaj });
                 await sock.sendMessage(fromJid, { text: `⚠️ Müşteriye (${cleanPhone}) eksik bilgi ve fotoğraf talebi gönderildi.` });
@@ -226,7 +240,7 @@ async function connectToWhatsApp() {
               }
 
               // YANIT 2: TEKLİF REDDİ (/red)
-              if (command === '/red') {
+              if (command === '/red' || command === '!red') {
                 const redMesaj = `Merhaba,\n\nLaptop Express'e ilettiğiniz teklif talebiniz incelenmiştir.\n\nMaalesef ilettiğiniz cihaz modeliniz veya durumu şu anki mağaza alım kriterlerimize uymamaktadır. İlginize teşekkür eder, iyi günler dileriz.`;
                 await sock.sendMessage(targetJid, { text: redMesaj });
                 await sock.sendMessage(fromJid, { text: `❌ Müşteriye (${cleanPhone}) ret mesajı iletildi.` });
@@ -238,15 +252,12 @@ async function connectToWhatsApp() {
               if (offerPrice && !isNaN(offerPrice)) {
                 const customerMessage = `Merhaba,\n\nLaptop Express üzerinden ilettiğiniz cihaz teklif talebiniz incelenmiştir.\n\n💰 *Firmamızın Değerleme Teklifi:* *${offerPrice} TL*\n\nTeklifi onaylıyorsanız mağazamızda veya adresinizde nakit ödeme işleminizi anında tamamlayabiliriz.`;
                 
-                // Müşteriye Gönder
                 await sock.sendMessage(targetJid, { text: customerMessage });
 
-                // DB'ye Kaydet
                 const now = new Date();
                 const dateStr = now.toLocaleDateString('tr-TR') + ' ' + now.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
                 saveCompletedOffer({ name: customerName, phone: cleanPhone, price: offerPrice, date: dateStr });
 
-                // Gruba Onay Bildirimi
                 await sock.sendMessage(fromJid, { text: `✓ *${offerPrice} TL* teklif müşteriye başarıyla iletildi ve kayıt altına alındı.` });
               }
             }
@@ -300,7 +311,6 @@ app.post('/send-offer', async (req, res) => {
           return res.status(500).json({ error: 'Gruba mesaj atılamadı.' });
         }
       } else {
-        // Kişisel sohbete yönlendirme tamamen silindi! Sadece gruba atar veya iptal eder.
         return res.status(404).json({ error: 'WhatsApp grubu bulunamadı, mesaj gönderimi iptal edildi.' });
       }
     } else {
