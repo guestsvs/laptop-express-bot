@@ -4,7 +4,6 @@ const cors = require('cors');
 const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
 
 const app = express();
 app.use(cors());
@@ -112,59 +111,6 @@ async function findGroupJidByName(groupName) {
     }
   } catch (e) {}
   return null;
-}
-
-// --- ESNAF PİYASA ANALİZ ALGORİTMASI ---
-async function fetchMarketPrice(cpu, gpu) {
-  return new Promise((resolve) => {
-    try {
-      const query = encodeURIComponent(`${cpu} ${gpu} laptop`.trim());
-      const options = {
-        hostname: 'www.sahibinden.com',
-        path: `/kelime-ile-arama?query=${query}`,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
-        }
-      };
-
-      https.get(options, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => {
-          const priceMatches = data.match(/(\d{1,3}(?:\.\d{3})+)\s*TL/g);
-          if (priceMatches && priceMatches.length > 3) {
-            const prices = priceMatches
-              .map(p => parseInt(p.replace(/\D/g, '')))
-              .filter(p => p > 5000 && p < 150000)
-              .sort((a, b) => a - b);
-
-            if (prices.length > 0) {
-              const sliced = prices.slice(Math.floor(prices.length * 0.2), Math.ceil(prices.length * 0.8));
-              const avg = sliced.reduce((a, b) => a + b, 0) / sliced.length;
-              
-              const minMarket = Math.round(avg * 0.9);
-              const maxMarket = Math.round(avg * 1.1);
-
-              // ESNAF ALIŞ MARJI (%35 KÂR ORANI)
-              const esnafMin = Math.round(minMarket * 0.65);
-              const esnafMax = Math.round(maxMarket * 0.65);
-
-              return resolve({
-                success: true,
-                marketMin: minMarket,
-                marketMax: maxMarket,
-                esnafMin,
-                esnafMax
-              });
-            }
-          }
-          resolve({ success: false });
-        });
-      }).on('error', () => resolve({ success: false }));
-    } catch (e) {
-      resolve({ success: false });
-    }
-  });
 }
 
 // --- ZAMAN AŞIMI VE OTOMATİK TAKİP KONTROLÜ ---
@@ -290,10 +236,9 @@ async function connectToWhatsApp() {
             `• *!sil* veya */sil* : Grup sohbetini temizler.\n\n` +
             `⚡ *TEKLİF YANITLAMA KOMUTLARI (Teklif Mesajını Yanıtlayarak)*\n` +
             `• *[Fiyat]* (Örn: 18500) : Fiyat teklifini müşteriye iletir.\n` +
-            `• */piyasa* : Cihazın piyasa değerini ve önerilen esnaf alış teklifini hesaplar.\n` +
-            `• */eksik* : Müşteriden detaylı fotoğrafları talep eder.\n` +
+            `• */eksik* : Müşteriden cihaz ve telefon fotoğraflarını talep eder.\n` +
             `• */red* : Teklif talebini kibarca reddeder.\n` +
-            `• */basarili* veya */anket* : Müşteriye değerlendirme/anket linki gönderir.`;
+            `• */anket* : Müşteriye değerlendirme linki gönderir.`;
           
           await sock.sendMessage(fromJid, { text: helpText });
           return;
@@ -348,33 +293,6 @@ async function connectToWhatsApp() {
             const customerName = nameMatch ? nameMatch[1].trim() : 'Belirtilmedi';
             const offerId = offerIdMatch ? offerIdMatch[1] : null;
 
-            // YANIT A: ESNAF PİYASA ANALİZİ (/piyasa)
-            if (command === '/piyasa' || command === '!piyasa') {
-              const cpuMatch = quotedText.match(/İşlemci:\s*([^\n]+)/);
-              const gpuMatch = quotedText.match(/Ekran Kartı:\s*([^\n]+)/);
-
-              const cpu = cpuMatch ? cpuMatch[1].trim() : '';
-              const gpu = gpuMatch ? gpuMatch[1].trim() : '';
-
-              await sock.sendMessage(fromJid, { text: `🔍 *Piyasa taranıyor...*\nDonanım: ${cpu} ${gpu}` });
-
-              const marketData = await fetchMarketPrice(cpu, gpu);
-
-              if (marketData.success) {
-                const analysisText = `📊 *ESNAF PİYASA DEĞERLEMESİ*\n\n` +
-                  `💻 *Donanım:* ${cpu} / ${gpu}\n\n` +
-                  `🛒 *İkinci El Piyasa Satış (Sahibinden):*\n` +
-                  `• ${marketData.marketMin.toLocaleString('tr-TR')} TL - ${marketData.marketMax.toLocaleString('tr-TR')} TL\n\n` +
-                  `💰 *Önerilen Esnaf Alış Teklifi (%35 Kâr Marjlı):*\n` +
-                  `• *${marketData.esnafMin.toLocaleString('tr-TR')} TL - ${marketData.esnafMax.toLocaleString('tr-TR')} TL*`;
-                
-                await sock.sendMessage(fromJid, { text: analysisText });
-              } else {
-                await sock.sendMessage(fromJid, { text: `⚠️ Piyasa verisi çekilemedi. Lütfen ilan fiyatlarını manuel kontrol ediniz.` });
-              }
-              return;
-            }
-
             if (phoneMatch) {
               let cleanPhone = phoneMatch[0].trim().replace(/\D/g, '');
               if (cleanPhone.startsWith('0')) cleanPhone = cleanPhone.substring(1);
@@ -383,9 +301,9 @@ async function connectToWhatsApp() {
 
               // YANIT 1: EKSİK BİLGİ TALEBİ (/eksik)
               if (command === '/eksik' || command === '!eksik') {
-                const eksikMesaj = `Merhaba,\n\nLaptop Express'e ilettiğiniz cihaz teklif talebiniz uzmanlarımız tarafından incelenmektedir.\n\nCihazınıza en doğru ve net değeri biçebilmemiz için lütfen cihazınızın detaylı fotoğraflarını (kasa, ekran, klavye) bu sohbete iletir misiniz?`;
+                const eksikMesaj = `Merhaba,\n\nLaptop Express'e ilettiğiniz cihaz teklif talebiniz uzmanlarımız tarafından incelenmektedir.\n\nCihazınıza en doğru ve net değeri biçebilmemiz için lütfen cihazın ve telefonun net fotoğraflarını (kasa, ekran, klavye) bu sohbete iletir misiniz?`;
                 await sock.sendMessage(targetJid, { text: eksikMesaj });
-                await sock.sendMessage(fromJid, { text: `⚠️ Müşteriye (${cleanPhone}) detaylı fotoğraf talebi gönderildi.` });
+                await sock.sendMessage(fromJid, { text: `⚠️ Müşteriye (${cleanPhone}) detaylı cihaz ve telefon fotoğrafı talebi gönderildi.` });
                 
                 if (offerId) removePendingOffer(offerId);
                 return;
@@ -401,8 +319,8 @@ async function connectToWhatsApp() {
                 return;
               }
 
-              // YANIT 3: BAŞARILI / ANKET YÖNLENDİRMESİ (/basarili veya /anket)
-              if (command === '/basarili' || command === '!basarili' || command === '/anket' || command === '!anket') {
+              // YANIT 3: ANKET YÖNLENDİRMESİ (/anket)
+              if (command === '/anket' || command === '!anket') {
                 const anketMesaj = `Merhaba,\n\nLaptop Express hizmet sürecini tamamladığınız için teşekkür ederiz! 🌟\n\nHizmet kalitemizi değerlendirmek ve deneyiminizi paylaşmak için aşağıdaki linkten kısa değerlendirmemize katılabilirsiniz:\n\n👉 https://laptopexpress.tr/degerlendirmeler`;
                 await sock.sendMessage(targetJid, { text: anketMesaj });
                 await sock.sendMessage(fromJid, { text: `⭐ Müşteriye (${cleanPhone}) değerlendirme/anket linki gönderildi.` });
@@ -469,10 +387,9 @@ app.post('/send-offer', async (req, res) => {
       `✨ *Kozmetik / Durum:* ${offer.kozmetik || '-'} / ${offer.kullanim_durumu || '-'}\n\n` +
       `💡 *İşlem Yapmak İçin Bu Mesajı "Yanıtla (Reply)" Yaparak Şunları Yazın:*\n` +
       `• *Rakam:* Fiyat teklifi iletir (Örn: 18500)\n` +
-      `• */piyasa* : Esnaf alış fiyatını hesaplar\n` +
-      `• */eksik* : Fotoğraf ister\n` +
+      `• */eksik* : Cihaz ve telefon fotoğrafı ister\n` +
       `• */red* : Kibarca reddeder\n` +
-      `• */basarili* : Değerlendirme linki gönderir`;
+      `• */anket* : Değerlendirme linki gönderir`;
 
     if (sock && connectionStatus === 'CONNECTED') {
       const groupJid = await findGroupJidByName(TARGET_GROUP_NAME);
