@@ -10,13 +10,75 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
-
-// Bildirimlerin gönderileceği WhatsApp grubunun TAM ADI
 const TARGET_GROUP_NAME = 'BOT'; 
+
+// VERİTABANI DOSYALARI
+const DB_FILE = path.join(__dirname, 'completed_offers.json'); // Tamamlanan işlemleri tutar
+const CONFIG_FILE = path.join(__dirname, 'bot_config.json');   // Grubun kalıcı JID kodunu tutar
 
 let sock = null;
 let currentQr = null;
 let connectionStatus = 'OFFLINE';
+let cachedGroupJid = null; 
+
+// --- VERİTABANI VE AYAR FONKSİYONLARI ---
+function getCompletedOffers() {
+  if (fs.existsSync(DB_FILE)) {
+    try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch (e) { return []; }
+  }
+  return [];
+}
+
+function saveCompletedOffer(offerData) {
+  let offers = getCompletedOffers();
+  offers.push(offerData);
+  if (offers.length > 50) offers = offers.slice(-50); // Son 50 işlemi tut
+  fs.writeFileSync(DB_FILE, JSON.stringify(offers, null, 2));
+}
+
+function getSavedGroupJid() {
+  if (cachedGroupJid) return cachedGroupJid;
+  if (fs.existsSync(CONFIG_FILE)) {
+    try { 
+      const data = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      if (data && data.groupJid) {
+        cachedGroupJid = data.groupJid;
+        return data.groupJid;
+      }
+    } catch (e) {}
+  }
+  return null;
+}
+
+function saveGroupJid(jid) {
+  if (jid && jid !== cachedGroupJid) {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify({ groupJid: jid }, null, 2));
+    cachedGroupJid = jid;
+    console.log(`💾 Grubun kalıcı JID kodu sisteme kazındı: ${jid}`);
+  }
+}
+// ---------------------------------------
+
+async function findGroupJidByName(groupName) {
+  let savedJid = getSavedGroupJid();
+  if (savedJid) return savedJid; // Varsa direkt kalıcı bellekten çek
+
+  try {
+    const groupList = await sock.groupFetchAllParticipating();
+    for (const jid in groupList) {
+      if (groupList[jid].subject && groupList[jid].subject.trim().toLowerCase() === groupName.trim().toLowerCase()) {
+        let cleanJid = jid;
+        if (cleanJid.endsWith('ag.us')) cleanJid = cleanJid.replace('ag.us', '@g.us'); // Hata düzeltme
+        
+        saveGroupJid(cleanJid); // Bulunca kalıcı hafızaya yaz
+        return cleanJid;
+      }
+    }
+  } catch (e) {
+    console.error('Grup arama hatası:', e);
+  }
+  return null;
+}
 
 async function connectToWhatsApp() {
   try {
@@ -31,9 +93,7 @@ async function connectToWhatsApp() {
       keepAliveIntervalMs: 25000,
       connectTimeoutMs: 90000,
       defaultQueryTimeoutMs: 90000,
-      retryRequestOptions: {
-        maxRetries: 5
-      },
+      retryRequestOptions: { maxRetries: 5 },
       browser: ['Laptop Express Bot', 'Chrome', '1.0.0']
     });
 
@@ -44,74 +104,92 @@ async function connectToWhatsApp() {
 
       if (qr) {
         connectionStatus = 'CONNECTING';
-        try {
-          currentQr = await QRCode.toDataURL(qr);
-          console.log('⚡ Yeni QR Kod Üretildi!');
-        } catch (err) {
-          console.error('QR Kod oluşturma hatası:', err);
-        }
+        currentQr = await QRCode.toDataURL(qr).catch(() => null);
       }
 
       if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-        console.log(`⚠️ Bağlantı kapandı. Durum Kodu: ${statusCode}. Oturum kapatıldı mı: ${isLoggedOut}`);
+        const notifyJid = getSavedGroupJid();
+        if (notifyJid && connectionStatus === 'CONNECTED') {
+          try {
+            await sock.sendMessage(notifyJid, { text: `🔴 *[SİSTEM DEVRE DIŞI]*\n\nBağlantı kesildi. Yeniden bağlanılıyor...` }).catch(() => null);
+          } catch (e) {}
+        }
+
         connectionStatus = 'OFFLINE';
 
         if (!isLoggedOut) {
-          console.log('🔄 Geçici kopma. Tekrar bağlanılıyor...');
           setTimeout(() => connectToWhatsApp(), 3000);
         } else {
-          console.log('❌ Kullanıcı oturumu kapattı. Klasör sıfırlanıyor...');
           currentQr = null;
-          if (fs.existsSync(authFolderPath)) {
-            try {
-              fs.rmSync(authFolderPath, { recursive: true, force: true });
-            } catch (e) {}
-          }
+          if (fs.existsSync(authFolderPath)) fs.rmSync(authFolderPath, { recursive: true, force: true });
           setTimeout(() => connectToWhatsApp(), 2000);
         }
       } else if (connection === 'open') {
-        console.log('✅ [BAŞARILI] WhatsApp Bağlantısı Tamamen Kuruldu!');
         connectionStatus = 'CONNECTED';
         currentQr = null;
+
+        setTimeout(async () => {
+          const groupJid = await findGroupJidByName(TARGET_GROUP_NAME);
+          if (groupJid) {
+            await sock.sendMessage(groupJid, {
+              text: `🟢 *[SİSTEM AKTİF]*\n\nLaptop Express Bot başarıyla başlatıldı ve dinlemede.\n\n_Biten işlemleri görmek için gruba *\/tamamlananlar* yazabilirsiniz._`
+            }).catch(() => null);
+          }
+        }, 3000);
       }
     });
 
-    // MESAJ İŞLEME MEKANİZMASI
+    // MESAJLARI DİNLEME VE KOMUT YÖNETİMİ
     sock.ev.on('messages.upsert', async (chatUpdate) => {
       try {
         const msg = chatUpdate.messages[0];
         if (!msg || !msg.message) return;
 
         let fromJid = msg.key.remoteJid;
+        if (fromJid.endsWith('ag.us')) fromJid = fromJid.replace('ag.us', '@g.us');
         
-        // Hatalı JID Düzeltici (ag.us -> @g.us)
-        if (fromJid.endsWith('ag.us')) {
-          fromJid = fromJid.replace('ag.us', '@g.us');
-        }
-
-        const messageContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
-
+        // Gruptan herhangi bir mesaj gelirse (nokta bile olsa) ID'yi garantiye al
         if (fromJid.endsWith('@g.us')) {
-          console.log(`📌 GRUP MESAJI ALGILANDI! Grup JID Adresi: ${fromJid}`);
+          saveGroupJid(fromJid);
         }
 
-        // MÜŞTERİYE TEKLİF İLETME (Yanıtla Yapıldığında)
+        const messageContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+
+        // DİSCORD TARZI KOMUT: /tamamlananlar
+        if (messageContent.trim().toLowerCase() === '/tamamlananlar') {
+          const offers = getCompletedOffers();
+          
+          if (offers.length === 0) {
+            await sock.sendMessage(fromJid, { text: '📭 *Kayıt Bulunamadı:*\nHenüz tamamlanan bir teklif işlemi yok.' });
+            return;
+          }
+
+          const last5 = offers.slice(-5).reverse();
+          let replyText = '✅ *SON 5 TAMAMLANAN TEKLİF*\n\n';
+          
+          last5.forEach((o, i) => {
+            replyText += `${i + 1}️⃣ *Müşteri:* ${o.name}\n💰 *Fiyat:* ${o.price} TL\n📅 *Tarih:* ${o.date}\n📞 *İletişim:* ${o.phone}\n\n`;
+          });
+
+          await sock.sendMessage(fromJid, { text: replyText.trim() });
+          return; 
+        }
+
+        // MÜŞTERİYE TEKLİF İLETME VE KAYIT ALTINA ALMA
         const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
-
         if (contextInfo && contextInfo.quotedMessage) {
-          const quotedText =
-            contextInfo.quotedMessage.conversation ||
-            contextInfo.quotedMessage.extendedTextMessage?.text ||
-            '';
+          const quotedText = contextInfo.quotedMessage.conversation || contextInfo.quotedMessage.extendedTextMessage?.text || '';
 
-          if (quotedText.includes('TEKLİF TALEBİ') || quotedText.includes('Müşteri') || quotedText.includes('Telefon')) {
+          if (quotedText.includes('TEKLİF TALEBİ') || quotedText.includes('Müşteri')) {
             const offerPrice = messageContent ? messageContent.trim() : null;
             const phoneMatch = quotedText.match(/(?:05|905|5)\d{8,9}/);
+            const nameMatch = quotedText.match(/Müşteri:\s*([^\n\*]+)/);
+            const customerName = nameMatch ? nameMatch[1].trim() : 'Belirtilmedi';
 
-            if (phoneMatch && offerPrice) {
+            if (phoneMatch && offerPrice && !isNaN(offerPrice)) {
               let rawPhone = phoneMatch[0].trim();
               let cleanPhone = rawPhone.replace(/\D/g, '');
               if (cleanPhone.startsWith('0')) cleanPhone = cleanPhone.substring(1);
@@ -122,12 +200,15 @@ async function connectToWhatsApp() {
 
               // Müşteriye Gönder
               await sock.sendMessage(targetJid, { text: customerMessage });
-              console.log(`✅ Müşteriye (${targetJid}) teklif iletildi: ${offerPrice} TL`);
 
-              // Gruba onay bildirimi geç
-              await sock.sendMessage(fromJid, {
-                text: `✓ *${offerPrice} TL* teklifiniz müşteriye (${cleanPhone}) başarıyla iletildi!`
-              });
+              // Veritabanına Kaydet
+              const now = new Date();
+              const dateStr = now.toLocaleDateString('tr-TR') + ' ' + now.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+              
+              saveCompletedOffer({ name: customerName, phone: cleanPhone, price: offerPrice, date: dateStr });
+
+              // Gruba Onay Bildirimi
+              await sock.sendMessage(fromJid, { text: `✓ *${offerPrice} TL* teklif müşteriye başarıyla iletildi ve kayıt altına alındı.` });
             }
           }
         }
@@ -141,26 +222,6 @@ async function connectToWhatsApp() {
   }
 }
 
-// WhatsApp Üzerindeki Tüm Gruplar İçinden İsimle JID Bulan Fonksiyon
-async function findGroupJidByName(groupName) {
-  try {
-    const groupList = await sock.groupFetchAllParticipating();
-    for (const jid in groupList) {
-      if (groupList[jid].subject.trim().toLowerCase() === groupName.trim().toLowerCase()) {
-        let cleanJid = jid;
-        if (cleanJid.endsWith('ag.us')) {
-          cleanJid = cleanJid.replace('ag.us', '@g.us');
-        }
-        return cleanJid;
-      }
-    }
-  } catch (e) {
-    console.error('Grup arama hatası:', e);
-  }
-  return null;
-}
-
-// ROTALAR
 app.get('/status', (req, res) => {
   res.json({
     status: connectionStatus,
@@ -172,9 +233,7 @@ app.get('/status', (req, res) => {
 app.post('/send-offer', async (req, res) => {
   try {
     const offer = req.body;
-    if (!offer || !offer.telefon) {
-      return res.status(400).json({ error: 'Eksik teklif verisi' });
-    }
+    if (!offer || !offer.telefon) return res.status(400).json({ error: 'Eksik teklif verisi' });
 
     const offerId = offer.id || 'Yeni';
     const adminNotification = `📩 *YENİ TEKLİF TALEBİ (#${offerId})*\n\n` +
@@ -184,27 +243,28 @@ app.post('/send-offer', async (req, res) => {
       `🎮 *Ekran Kartı:* ${offer.ekran_karti || '-'}\n` +
       `⚡ *RAM / SSD:* ${offer.ram || '-'} / ${offer.ssd || '-'}\n` +
       `✨ *Kozmetik / Durum:* ${offer.kozmetik || '-'} / ${offer.kullanim_durumu || '-'}\n\n` +
-      `💡 *Fiyat Vermek İçin:* Bu mesaja "Yanıtla (Reply)" yaparak vermek istediğiniz rakamı yazın (Örn: 18500).`;
+      `💡 *Fiyat Vermek İçin:* Bu mesaja "Yanıtla (Reply)" yaparak vermek istediğiniz rakamı (sadece sayı olarak, örn: 18500) yazın.`;
 
     if (sock && connectionStatus === 'CONNECTED') {
       const groupJid = await findGroupJidByName(TARGET_GROUP_NAME);
 
       if (groupJid) {
-        await sock.sendMessage(groupJid, { text: adminNotification });
-        console.log(`✅ Teklif bildirimi "${TARGET_GROUP_NAME}" grubuna (${groupJid}) başarıyla gönderildi.`);
-        return res.json({ success: true, message: 'Gruba bildirim gönderildi.' });
+        try {
+          await sock.sendMessage(groupJid, { text: adminNotification });
+          return res.json({ success: true, message: 'Gruba bildirim gönderildi.' });
+        } catch (sendErr) {
+          console.error('Gruba atılamadı:', sendErr);
+          return res.status(500).json({ error: 'Gruba mesaj atılamadı.' });
+        }
       } else {
-        console.log(`⚠️ "${TARGET_GROUP_NAME}" isimli grup bulunamadı. Kişisel sohbete gönderiliyor...`);
-        const userNumber = sock.user.id.split(':')[0].split('@')[0];
-        const myJid = `${userNumber}@s.whatsapp.net`;
-        await sock.sendMessage(myJid, { text: adminNotification });
-        return res.json({ success: true, message: 'Grup bulunamadığı için kişisel sohbete gönderildi.' });
+        // GRUP BULUNAMAZSA KİŞİSEL SOHBETE GİTMESİ TAMAMEN İPTAL EDİLDİ!
+        console.error(`⚠️ "${TARGET_GROUP_NAME}" isimli grup bulunamadı. Mesaj iptal edildi.`);
+        return res.status(404).json({ error: 'WhatsApp grubu bulunamadı, mesaj gönderimi iptal edildi.' });
       }
     } else {
       return res.status(503).json({ error: 'WhatsApp botu henüz bağlı değil' });
     }
   } catch (error) {
-    console.error('send-offer Hata:', error);
     return res.status(500).json({ error: error.message });
   }
 });
@@ -215,33 +275,22 @@ app.post('/logout', async (req, res) => {
     currentQr = null;
 
     if (sock) {
-      try {
-        sock.ev.removeAllListeners();
-        await sock.logout();
-      } catch (e) {}
+      sock.ev.removeAllListeners();
+      await sock.logout().catch(()=>{});
       sock = null;
     }
 
     const authFolderPath = path.join(__dirname, 'auth_info_baileys');
-    if (fs.existsSync(authFolderPath)) {
-      try {
-        fs.rmSync(authFolderPath, { recursive: true, force: true });
-      } catch (e) {}
-    }
+    if (fs.existsSync(authFolderPath)) fs.rmSync(authFolderPath, { recursive: true, force: true });
 
-    setTimeout(() => {
-      connectToWhatsApp();
-    }, 1000);
-
+    setTimeout(() => connectToWhatsApp(), 1000);
     return res.json({ success: true, message: 'Oturum kapatıldı' });
   } catch (err) {
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: err.message });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`Bot servisi ${PORT} portunda çalışıyor.`);
-  setTimeout(() => {
-    connectToWhatsApp();
-  }, 2000);
+  setTimeout(() => connectToWhatsApp(), 2000);
 });
