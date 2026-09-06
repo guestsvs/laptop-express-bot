@@ -4,6 +4,7 @@ const cors = require('cors');
 const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 
 const app = express();
 app.use(cors());
@@ -113,7 +114,60 @@ async function findGroupJidByName(groupName) {
   return null;
 }
 
-// --- ZAMAN AŞIMI VE OTOMATİK TAKİP KONTROLÜ (CRON/INTERVAL) ---
+// --- ESNAF PİYASA ANALİZ ALGORİTMASI ---
+async function fetchMarketPrice(cpu, gpu) {
+  return new Promise((resolve) => {
+    try {
+      const query = encodeURIComponent(`${cpu} ${gpu} laptop`.trim());
+      const options = {
+        hostname: 'www.sahibinden.com',
+        path: `/kelime-ile-arama?query=${query}`,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+        }
+      };
+
+      https.get(options, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          const priceMatches = data.match(/(\d{1,3}(?:\.\d{3})+)\s*TL/g);
+          if (priceMatches && priceMatches.length > 3) {
+            const prices = priceMatches
+              .map(p => parseInt(p.replace(/\D/g, '')))
+              .filter(p => p > 5000 && p < 150000)
+              .sort((a, b) => a - b);
+
+            if (prices.length > 0) {
+              const sliced = prices.slice(Math.floor(prices.length * 0.2), Math.ceil(prices.length * 0.8));
+              const avg = sliced.reduce((a, b) => a + b, 0) / sliced.length;
+              
+              const minMarket = Math.round(avg * 0.9);
+              const maxMarket = Math.round(avg * 1.1);
+
+              // ESNAF ALIŞ MARJI (%35 KÂR ORANI)
+              const esnafMin = Math.round(minMarket * 0.65);
+              const esnafMax = Math.round(maxMarket * 0.65);
+
+              return resolve({
+                success: true,
+                marketMin: minMarket,
+                marketMax: maxMarket,
+                esnafMin,
+                esnafMax
+              });
+            }
+          }
+          resolve({ success: false });
+        });
+      }).on('error', () => resolve({ success: false }));
+    } catch (e) {
+      resolve({ success: false });
+    }
+  });
+}
+
+// --- ZAMAN AŞIMI VE OTOMATİK TAKİP KONTROLÜ ---
 function startBackgroundJobs() {
   setInterval(async () => {
     if (!sock || connectionStatus !== 'CONNECTED') return;
@@ -123,7 +177,6 @@ function startBackgroundJobs() {
     const now = Date.now();
 
     for (const offer of pending) {
-      // 1. ZAMAN AŞIMI UYARISI (24 Saat Boyunca Yanıt Verilmediyse Gruba Bildir)
       if (offer.status === 'WAITING_RESPONSE' && !offer.timeoutWarned && (now - offer.createdAt > 24 * 60 * 60 * 1000)) {
         if (groupJid) {
           await sock.sendMessage(groupJid, {
@@ -133,7 +186,6 @@ function startBackgroundJobs() {
         updatePendingOffer(offer.id, { timeoutWarned: true });
       }
 
-      // 2. OTOMATİK MÜŞTERİ TAKİBİ / FOLLOW-UP (Fiyat verildikten 6 saat sonra müşteriye durum sorma)
       if (offer.status === 'OFFER_SENT' && !offer.followUpSent && (now - offer.offerSentAt > 6 * 60 * 60 * 1000)) {
         const targetJid = `${offer.phone}@s.whatsapp.net`;
         const followUpMsg = `Merhaba,\n\nLaptop Express üzerinden ilettiğimiz fiyat teklifini değerlendirme fırsatınız oldu mu? Aklınıza takılan bir detay varsa yardımcı olmaktan mutluluk duyarız.`;
@@ -148,7 +200,7 @@ function startBackgroundJobs() {
         updatePendingOffer(offer.id, { followUpSent: true });
       }
     }
-  }, 5 * 60 * 1000); // 5 dakikada bir kontrol eder
+  }, 5 * 60 * 1000);
 }
 
 // --- BAĞLANTI ANA GÖVDESİ ---
@@ -238,6 +290,7 @@ async function connectToWhatsApp() {
             `• *!sil* veya */sil* : Grup sohbetini temizler.\n\n` +
             `⚡ *TEKLİF YANITLAMA KOMUTLARI (Teklif Mesajını Yanıtlayarak)*\n` +
             `• *[Fiyat]* (Örn: 18500) : Fiyat teklifini müşteriye iletir.\n` +
+            `• */piyasa* : Cihazın piyasa değerini ve önerilen esnaf alış teklifini hesaplar.\n` +
             `• */eksik* : Müşteriden detaylı fotoğrafları talep eder.\n` +
             `• */red* : Teklif talebini kibarca reddeder.\n` +
             `• */basarili* veya */anket* : Müşteriye değerlendirme/anket linki gönderir.`;
@@ -246,7 +299,6 @@ async function connectToWhatsApp() {
           return;
         }
 
-        // SOHBETİ TEMİZLEME (!sil) KOMUTU
         if (command === '!sil' || command === '/sil') {
           try {
             await sock.chatModify(
@@ -295,6 +347,33 @@ async function connectToWhatsApp() {
             
             const customerName = nameMatch ? nameMatch[1].trim() : 'Belirtilmedi';
             const offerId = offerIdMatch ? offerIdMatch[1] : null;
+
+            // YANIT A: ESNAF PİYASA ANALİZİ (/piyasa)
+            if (command === '/piyasa' || command === '!piyasa') {
+              const cpuMatch = quotedText.match(/İşlemci:\s*([^\n]+)/);
+              const gpuMatch = quotedText.match(/Ekran Kartı:\s*([^\n]+)/);
+
+              const cpu = cpuMatch ? cpuMatch[1].trim() : '';
+              const gpu = gpuMatch ? gpuMatch[1].trim() : '';
+
+              await sock.sendMessage(fromJid, { text: `🔍 *Piyasa taranıyor...*\nDonanım: ${cpu} ${gpu}` });
+
+              const marketData = await fetchMarketPrice(cpu, gpu);
+
+              if (marketData.success) {
+                const analysisText = `📊 *ESNAF PİYASA DEĞERLEMESİ*\n\n` +
+                  `💻 *Donanım:* ${cpu} / ${gpu}\n\n` +
+                  `🛒 *İkinci El Piyasa Satış (Sahibinden):*\n` +
+                  `• ${marketData.marketMin.toLocaleString('tr-TR')} TL - ${marketData.marketMax.toLocaleString('tr-TR')} TL\n\n` +
+                  `💰 *Önerilen Esnaf Alış Teklifi (%35 Kâr Marjlı):*\n` +
+                  `• *${marketData.esnafMin.toLocaleString('tr-TR')} TL - ${marketData.esnafMax.toLocaleString('tr-TR')} TL*`;
+                
+                await sock.sendMessage(fromJid, { text: analysisText });
+              } else {
+                await sock.sendMessage(fromJid, { text: `⚠️ Piyasa verisi çekilemedi. Lütfen ilan fiyatlarını manuel kontrol ediniz.` });
+              }
+              return;
+            }
 
             if (phoneMatch) {
               let cleanPhone = phoneMatch[0].trim().replace(/\D/g, '');
@@ -345,7 +424,6 @@ async function connectToWhatsApp() {
 
                 await sock.sendMessage(fromJid, { text: `✓ *${offerPrice} TL* teklif müşteriye başarıyla iletildi ve kayıt altına alındı.` });
 
-                // Takip durumu güncellemesi: Fiyat verildi, 6 saatlik takip süreci başlatıldı
                 if (offerId) {
                   updatePendingOffer(offerId, {
                     status: 'OFFER_SENT',
@@ -391,6 +469,7 @@ app.post('/send-offer', async (req, res) => {
       `✨ *Kozmetik / Durum:* ${offer.kozmetik || '-'} / ${offer.kullanim_durumu || '-'}\n\n` +
       `💡 *İşlem Yapmak İçin Bu Mesajı "Yanıtla (Reply)" Yaparak Şunları Yazın:*\n` +
       `• *Rakam:* Fiyat teklifi iletir (Örn: 18500)\n` +
+      `• */piyasa* : Esnaf alış fiyatını hesaplar\n` +
       `• */eksik* : Fotoğraf ister\n` +
       `• */red* : Kibarca reddeder\n` +
       `• */basarili* : Değerlendirme linki gönderir`;
@@ -402,7 +481,6 @@ app.post('/send-offer', async (req, res) => {
         try {
           await sock.sendMessage(groupJid, { text: adminNotification });
 
-          // Zaman aşımı ve Takip için Kayıt
           savePendingOffer({
             id: offerId,
             phone: offer.telefon.trim().replace(/\D/g, ''),
