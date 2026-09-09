@@ -10,7 +10,7 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
-const TARGET_GROUP_NAME = 'LAPTOP EXPRESS BOT'; 
+const TARGET_GROUP_NAME = 'LAPTOPEXPRESS BOT'; 
 
 // KALICI HAFIZA VE VERİTABANI DOSYALARI
 const DB_FILE = path.join(__dirname, 'completed_offers.json'); 
