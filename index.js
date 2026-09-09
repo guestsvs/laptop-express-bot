@@ -20,7 +20,6 @@ const PENDING_FILE = path.join(__dirname, 'pending_offers.json');
 let sock = null;
 let currentQr = null;
 let connectionStatus = 'OFFLINE';
-let cachedGroupJid = null; 
 
 // --- VERİTABANI VE TAKİP YÖNETİMİ ---
 function getCompletedOffers() {
@@ -73,43 +72,22 @@ function updatePendingOffer(offerId, updateData) {
   }
 }
 
-// --- JID (GRUP ID) KALICI HAFIZA ---
-function getSavedGroupJid() {
-  if (cachedGroupJid) return cachedGroupJid;
-  if (fs.existsSync(CONFIG_FILE)) {
-    try { 
-      const data = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-      if (data && data.groupJid) {
-        cachedGroupJid = data.groupJid;
-        return data.groupJid;
-      }
-    } catch (e) {}
-  }
-  return null;
-}
-
-function saveGroupJid(jid) {
-  if (jid && jid !== cachedGroupJid) {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify({ groupJid: jid }, null, 2));
-    cachedGroupJid = jid;
-  }
-}
-
-async function findGroupJidByName(groupName) {
-  let savedJid = getSavedGroupJid();
-  if (savedJid) return savedJid;
-
+// --- GÜVENLİ VE BİREBİR İSİM EŞLEŞTİRMELİ GRUP BULUCU ---
+async function getSafeGroupJid() {
+  if (!sock) return null;
   try {
     const groupList = await sock.groupFetchAllParticipating();
     for (const jid in groupList) {
-      if (groupList[jid].subject && groupList[jid].subject.trim().toLowerCase() === groupName.trim().toLowerCase()) {
+      const groupSubject = groupList[jid].subject || "";
+      if (groupSubject.trim().toLowerCase() === TARGET_GROUP_NAME.trim().toLowerCase()) {
         let cleanJid = jid;
         if (cleanJid.endsWith('ag.us')) cleanJid = cleanJid.replace('ag.us', '@g.us');
-        saveGroupJid(cleanJid); 
         return cleanJid;
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    console.error('Grup arama hatası:', e);
+  }
   return null;
 }
 
@@ -118,7 +96,7 @@ function startBackgroundJobs() {
   setInterval(async () => {
     if (!sock || connectionStatus !== 'CONNECTED') return;
 
-    const groupJid = getSavedGroupJid();
+    const groupJid = await getSafeGroupJid();
     const pending = getPendingOffers();
     const now = Date.now();
 
@@ -181,11 +159,13 @@ async function connectToWhatsApp() {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-        const notifyJid = getSavedGroupJid();
-        if (notifyJid && connectionStatus === 'CONNECTED') {
-          try {
-            await sock.sendMessage(notifyJid, { text: `🔴 *[SİSTEM DEVRE DIŞI]*\nBot bağlantısı kesildi. Yeniden bağlanıyor...` }).catch(() => null);
-          } catch (e) {}
+        if (connectionStatus === 'CONNECTED') {
+          const notifyJid = await getSafeGroupJid();
+          if (notifyJid) {
+            try {
+              await sock.sendMessage(notifyJid, { text: `🔴 *[SİSTEM DEVRE DIŞI]*\nBot bağlantısı kesildi. Yeniden bağlanıyor...` }).catch(() => null);
+            } catch (e) {}
+          }
         }
 
         connectionStatus = 'OFFLINE';
@@ -202,11 +182,13 @@ async function connectToWhatsApp() {
         currentQr = null;
 
         setTimeout(async () => {
-          const groupJid = await findGroupJidByName(TARGET_GROUP_NAME);
+          const groupJid = await getSafeGroupJid();
           if (groupJid) {
             await sock.sendMessage(groupJid, {
               text: `🟢 *[SİSTEM AKTİF]*\n\nLaptop Express CRM Bot başarıyla başlatıldı.\nKomutları görmek için gruba */yardım* yazabilirsiniz.`
             }).catch(() => null);
+          } else {
+            console.log(`⚠️ HATA: "${TARGET_GROUP_NAME}" adında grup bulunamadı!`);
           }
         }, 3000);
       }
@@ -221,7 +203,9 @@ async function connectToWhatsApp() {
         let fromJid = msg.key.remoteJid;
         if (fromJid.endsWith('ag.us')) fromJid = fromJid.replace('ag.us', '@g.us');
         
-        if (fromJid.endsWith('@g.us')) saveGroupJid(fromJid);
+        // GÜVENLİK DUVARI: Sadece "LAPTOP EXPRESS BOT" grubundan gelen mesajları işle
+        const validGroupJid = await getSafeGroupJid();
+        if (!validGroupJid || fromJid !== validGroupJid) return;
 
         const messageContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
         const command = messageContent.trim().toLowerCase();
@@ -392,7 +376,7 @@ app.post('/send-offer', async (req, res) => {
       `• */anket* : Değerlendirme linki gönderir`;
 
     if (sock && connectionStatus === 'CONNECTED') {
-      const groupJid = await findGroupJidByName(TARGET_GROUP_NAME);
+      const groupJid = await getSafeGroupJid();
 
       if (groupJid) {
         try {
