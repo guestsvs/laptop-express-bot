@@ -180,17 +180,6 @@ async function connectToWhatsApp() {
       } else if (connection === 'open') {
         connectionStatus = 'CONNECTED';
         currentQr = null;
-
-        setTimeout(async () => {
-          const groupJid = await getSafeGroupJid();
-          if (groupJid) {
-            await sock.sendMessage(groupJid, {
-              text: `🟢 *[SİSTEM AKTİF]*\n\nLaptop Express CRM Bot başarıyla başlatıldı.\nKomutları görmek için gruba */yardım* yazabilirsiniz.`
-            }).catch(() => null);
-          } else {
-            console.log(`⚠️ HATA: "${TARGET_GROUP_NAME}" adında grup bulunamadı!`);
-          }
-        }, 3000);
       }
     });
 
